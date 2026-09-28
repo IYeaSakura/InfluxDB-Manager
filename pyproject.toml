@@ -1,0 +1,30 @@
+[project]
+name = "net.sakurain.influxdbstudio"
+version = "1.0.0"
+description = "InfluxDB Manager — a UI management tool for the InfluxDB (1.x) time series database, rebuilt in Python/PySide6 with new features (DBeaver-style grid, pagination, bilingual UI)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = [
+    "PySide6>=6.5",
+    "httpx>=0.24",
+    "platformdirs>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+influxdb-manager = "net.sakurain.influxdbstudio.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"net.sakurain.influxdbstudio" = ["resources/icons/*.png", "resources/*.ico"]

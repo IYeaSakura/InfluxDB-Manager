@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+build/
+dist/
+build_*/
+dist_*/
+exe_test*.log
+
+# Tooling
+*.log
+*.bak
+*.old
+.idea/
+.vscode/
+Github-Readme-Writer/
+
+# Project
+*.disabled
+*.zip

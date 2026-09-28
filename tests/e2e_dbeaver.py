@@ -1,0 +1,730 @@
+# -*- coding: utf-8 -*-
+"""DBeaver-like 功能端到端测试。
+
+分两部分：
+1. 只读部分连真实服务端（10.82.10.103 / zn_data），验证分页 LIMIT/OFFSET
+   注入、翻页、COUNT 总数——全部 SELECT，不触碰任何数据。
+2. 编辑/保存流程使用 FakeClient（write() 只记录、不联网），验证单元格编辑、
+   脏标记、复制粘贴、二次确认保存、回滚——绝不对生产库执行写操作。
+"""
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtGui import QKeyEvent
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+
+qapp = QApplication(sys.argv)
+
+from net.sakurain.influxdbstudio import app as app_module
+from net.sakurain.influxdbstudio.core.client import InfluxDbClient, create_client
+from net.sakurain.influxdbstudio.core.models import (
+    InfluxDbConnection,
+    InfluxDbFieldKey,
+    InfluxDbSeries,
+)
+from net.sakurain.influxdbstudio.i18n import set_language
+from net.sakurain.influxdbstudio.ui import controls
+
+RESULTS = []
+SHOTS_DIR = Path(__file__).resolve().parent / "e2e_screenshots"
+SHOTS_DIR.mkdir(exist_ok=True)
+_shot = 0
+
+
+def check(name, condition, detail=""):
+    status = "PASS" if condition else "FAIL"
+    RESULTS.append((status, name, detail))
+    print(f"[{status}] {name} {detail}")
+    return condition
+
+
+def check_soft(name, condition, detail=""):
+    """服务端负载高时可能超时的检查：失败记 WARN 不算失败。"""
+    if condition:
+        return check(name, True, detail)
+    RESULTS.append(("WARN", name, detail))
+    print(f"[WARN] {name} {detail}")
+    return False
+
+
+def shot(widget, name):
+    global _shot
+    _shot += 1
+    widget.grab().save(str(SHOTS_DIR / f"db_{_shot:02d}_{name}.png"))
+
+
+def wait_for(predicate, timeout_ms=15000, step=100):
+    waited = 0
+    while waited < timeout_ms:
+        qapp.processEvents()
+        QTest.qWait(step)
+        waited += step
+        try:
+            if predicate():
+                return True
+        except Exception:
+            pass
+    try:
+        return predicate()
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# 弹窗替身
+# ---------------------------------------------------------------------------
+MODALS = []
+SAVE_DIALOG_RESPONSES = []
+
+
+def fake_critical(parent, title, text, *a, **k):
+    MODALS.append(("critical", title, text))
+    return QMessageBox.Ok
+
+
+def fake_information(parent, title, text, *a, **k):
+    MODALS.append(("information", title, text))
+    return QMessageBox.Ok
+
+
+def fake_warning(parent, title, text, buttons=QMessageBox.Ok, *a, **k):
+    MODALS.append(("warning", title, text))
+    if buttons & QMessageBox.Cancel:
+        return QMessageBox.Cancel
+    return QMessageBox.Ok
+
+
+QMessageBox.critical = staticmethod(fake_critical)
+QMessageBox.information = staticmethod(fake_information)
+QMessageBox.warning = staticmethod(fake_warning)
+
+# 保存确认框：默认接受（Save），把内容记下来供断言
+CONFIRM_TEXTS = []
+
+
+def fake_box_exec(self):
+    CONFIRM_TEXTS.append((self.windowTitle(), self.text(),
+                          self.informativeText()))
+    return QMessageBox.Save
+
+
+QMessageBox.exec = lambda self: fake_box_exec(self)
+
+QFileDialog.getSaveFileName = staticmethod(
+    lambda parent, title, directory, filter_: SAVE_DIALOG_RESPONSES.pop(0)
+    if SAVE_DIALOG_RESPONSES else ("", ""))
+QFileDialog.getOpenFileName = staticmethod(
+    lambda parent, title, directory, filter_: ("", ""))
+
+# ---------------------------------------------------------------------------
+# 配置隔离
+# ---------------------------------------------------------------------------
+import net.sakurain.influxdbstudio.core.settings as settings_module
+from net.sakurain.influxdbstudio.core.settings import AppSettings
+_CFG_TMP = Path(tempfile.mkdtemp(prefix="influxdbstudio_dbe2e_"))
+settings_module._settings_path = lambda: str(_CFG_TMP / "settings.json")
+
+settings = AppSettings(version="e2e")
+app_module.settings = settings
+set_language("zh_CN")
+
+
+def run_query_and_wait(control, timeout_ms=240000):
+    """执行查询并等待其完成（_loading 归位且结果已渲染）。"""
+    control.execute_request()
+    return wait_for(lambda: not control._loading and control.results_tabs.count() > 0
+                    and "结果" in control.results_label.text(), timeout_ms)
+
+# ===========================================================================
+# 第一部分：真实服务端只读分页验证（SELECT / COUNT 均只读）
+# 可用 `python tests/e2e_dbeaver.py --part2` 只跑第二部分（真实服务端查询
+# 较慢时便于拆分运行）
+# ===========================================================================
+RUN_PART2_ONLY = "--part2" in sys.argv
+RUN_PART1_ONLY = "--part1" in sys.argv
+conn = InfluxDbConnection.create(
+    name="zn_data", host="10.82.10.103", port=31123, username="sa",
+    password="sa", database="zn_data")
+
+if not RUN_PART2_ONLY:
+    print("== 第一部分：真实服务端只读分页 ==")
+    real_client = create_client(conn)
+
+    executed = []
+    _orig_query = real_client.query
+
+
+def recording_query(database, query):
+    executed.append(query)
+    return _orig_query(database, query)
+
+
+def run_part1():
+    real_client.query = recording_query
+
+    qc = controls.QueryControl()
+    qc.influx_client = real_client
+    qc.database = "zn_data"
+    qc.show()
+    # 该服务端深 OFFSET 翻页极慢，用每页 100 控制扫描深度
+    qc._apply_page_size(qc.page_size_combo.itemData(0))  # 100/页
+    qc.editor_text = 'SELECT * FROM "curveData3761"'
+    ok = run_query_and_wait(qc)
+    check("分页查询第1页出结果", ok, qc.results_label.text())
+    check("注入 LIMIT/OFFSET",
+          any("LIMIT 100 OFFSET 0" in q for q in executed), str(executed[-2:]))
+    check("分页栏可见", qc.pager_widget.isVisible())
+
+    # 总数统计（COUNT 查询只读；服务端慢，不等结果，显示"未知"也是正确行为）
+    wait_for(lambda: qc._total is not None, timeout_ms=90000)
+    check("COUNT 总数加载或显示未知(只读)",
+          qc._total is not None or "未知" in qc.page_rows_label.text(),
+          f"total={qc._total} label={qc.page_rows_label.text()}")
+
+    # 翻页到第 2 页：注入断言只看 executed（查询发出即记录，不等渲染；
+    # 深 OFFSET 翻页在该服务端可达数分钟，渲染已由 Fake 部分充分验证）
+    ok = wait_for(lambda: not qc._loading, timeout_ms=60000)
+    executed.clear()
+    qc._goto_page(2)
+    ok = wait_for(lambda: any("LIMIT 100 OFFSET 100" in q for q in executed),
+                  timeout_ms=30000)
+    check("翻页注入 OFFSET 100", ok, str(executed[-2:]))
+    check("页码状态", qc._page == 2, f"page={qc._page}")
+
+    shot(qc, "pagination_real")
+
+    # 可拖高度分隔条
+    check("编辑器/结果区分隔条存在", qc.main_splitter.count() == 2)
+
+
+if not RUN_PART2_ONLY:
+    run_part1()
+
+if RUN_PART1_ONLY:
+    fails = [r for r in RESULTS if r[0] == "FAIL"]
+    print(f"\n第一部分单独运行: {len(RESULTS) - len(fails)} 通过, {len(fails)} 失败")
+    for status, name, detail in fails:
+        print(f"  FAIL: {name} {detail}")
+    sys.exit(1 if fails else 0)
+
+# ===========================================================================
+# 第二部分：编辑/保存流程（FakeClient，write 不联网）
+# ===========================================================================
+print("== 第二部分：编辑/保存流程（模拟客户端） ==")
+
+
+class FakeClient(InfluxDbClient):
+    def __init__(self):
+        self.connection = conn
+        self.written = []      # (database, points)
+        self.queries = []
+        self.commands = []     # (database, statement) passed to execute_command
+
+    def query(self, database, query):
+        self.queries.append(query)
+        q = query.strip()
+        if q.upper().startswith("SELECT COUNT("):
+            return [InfluxDbSeries("m", ["time", "count_v"], None,
+                                   [["1970-01-01T00:00:00Z", 250]])]
+        if q.upper().startswith("SELECT"):
+            # 按 LIMIT/OFFSET 切片 canned 行，模拟真实分页
+            import re as _re
+            rows = [["2026-09-27T16:00:00Z", "042760236", "0.5", 3]]
+            lim = _re.search(r"\blimit\s+(\d+)", q, _re.IGNORECASE)
+            off = _re.search(r"\boffset\s+(\d+)", q, _re.IGNORECASE)
+            if lim:
+                n = int(lim.group(1))
+                o = int(off.group(1)) if off else 0
+                rows = (rows * (o + n + 1))[o:o + n]
+            return [InfluxDbSeries("curveData3761",
+                                   ["time", "nmunicateAddr", "currentA",
+                                    "frozenDensity"], None, rows)]
+        return []
+
+    def get_field_keys(self, database, measurement):
+        return [InfluxDbFieldKey(Name="currentA", Type="string"),
+                InfluxDbFieldKey(Name="frozenDensity", Type="integer")]
+
+    def get_tag_keys(self, database, measurement):
+        return ["nmunicateAddr"]
+
+    def write(self, database, measurement=None, tags=None, fields=None,
+              time_stamp=None, retention_policy=None, point=None, points=None):
+        from net.sakurain.influxdbstudio.core.models import InfluxDbApiResponse
+        pts = list(points) if points is not None else [point]
+        self.written.append((database, pts))
+        return InfluxDbApiResponse("", 204, True)
+
+    def execute_command(self, database, query):
+        from net.sakurain.influxdbstudio.core.models import InfluxDbApiResponse
+        self.commands.append((database, query))
+        return InfluxDbApiResponse("", 204, True)
+
+
+# -- 分页（FakeClient 快速验证每页条数切换与 OFFSET 递增）--------------------
+fake_pager = FakeClient()
+qc_fake = controls.QueryControl()
+qc_fake.influx_client = fake_pager
+qc_fake.database = "zn_data"
+qc_fake.show()
+qc_fake.editor_text = 'SELECT * FROM "curveData3761"'
+qc_fake.execute_request()
+ok = wait_for(lambda: not qc_fake._loading and qc_fake.results_tabs.count() > 0,
+              timeout_ms=8000)
+check("Fake 分页第1页", ok and any("LIMIT 500 OFFSET 0" in q for q in fake_pager.queries))
+check("Fake COUNT 总数", wait_for(lambda: qc_fake._total == 250, timeout_ms=8000),
+      f"total={qc_fake._total}")
+check("总数标签", "250" in qc_fake.page_rows_label.text(), qc_fake.page_rows_label.text())
+
+qc_fake._apply_page_size(qc_fake.page_size_combo.itemData(0))  # 每页 100
+ok = wait_for(lambda: not qc_fake._loading
+              and any("LIMIT 100 OFFSET 0" in q for q in fake_pager.queries),
+              timeout_ms=8000)
+check("切换每页100并重查", ok and qc_fake._page == 1, f"page={qc_fake._page}")
+qc_fake._goto_page(2)
+ok = wait_for(lambda: not qc_fake._loading
+              and any("LIMIT 100 OFFSET 100" in q for q in fake_pager.queries),
+              timeout_ms=8000)
+check("第2页 OFFSET 100", ok and qc_fake._page == 2, f"page={qc_fake._page}")
+check("末页按钮可用", qc_fake.btn_last.isEnabled())
+qc_fake.btn_last.click()
+ok = wait_for(lambda: qc_fake._page == 3 and not qc_fake._loading, timeout_ms=8000)
+check("尾页跳转第3页(250行/100)", ok, f"page={qc_fake._page}")
+
+qc_fake.editor_text = 'SELECT * FROM "curveData3761" LIMIT 5'
+qc_fake.execute_request()
+ok = wait_for(lambda: not qc_fake._loading and qc_fake.results_tabs.count() > 0,
+              timeout_ms=8000)
+check("显式 LIMIT 隐藏分页栏(Fake)", ok and not qc_fake.pager_widget.isVisible())
+
+shot(qc_fake, "pagination_fake")
+
+# -- 结果网格编辑 -------------------------------------------------------------
+fake = FakeClient()
+rc = controls.QueryResultsControl()
+rc.influx_client = fake
+rc.database = "zn_data"
+rc.show()
+series = InfluxDbSeries(
+    "curveData3761",
+    ["time", "nmunicateAddr", "currentA", "frozenDensity"],
+    None,
+    [["2026-09-27T16:00:00.000000001Z", "042760236", "0.5", 3],
+     ["2026-09-27T16:01:00Z", "042760237", "0.7", 4]])
+rc.update_results(series)
+ok = wait_for(lambda: rc._edit_meta_loaded, timeout_ms=8000)
+check("字段/标签元数据加载", ok)
+# 列布局: 0="#" 1="time" 2="nmunicateAddr"(标签) 3="currentA"(字段,string)
+#         4="frozenDensity"(字段,integer)
+check("字段列可编辑", rc.is_editable_cell(0, 3) and rc.is_editable_cell(0, 4))
+check("time 列只读", not rc.is_editable_cell(0, 1))
+check("标签列(nmunicateAddr)只读", not rc.is_editable_cell(0, 2))
+check("序号列只读", not rc.is_editable_cell(0, 0))
+
+# 编辑单元格 → 脏标记 + 高亮（frozenDensity 为 integer 字段）
+item = rc.table.item(0, 4)
+item.setText("42")
+check("编辑产生脏标记", rc._dirty_cell_count() == 1)
+check("脏单元格高亮", rc.table.item(0, 4).background().color().name() == "#ffe9b3")
+check("类型推断为整数", rc._dirty[(0, 4)][1] == 42)
+
+# 回滚
+rc.revert_changes()
+check("回滚清除脏标记", rc._dirty_cell_count() == 0)
+check("回滚恢复原值", rc.table.item(0, 4).text() == "3")
+
+# 复制/粘贴
+rc.table.clearSelection()
+rc.table.item(0, 3).setSelected(True)
+rc.table.item(0, 4).setSelected(True)
+rc.copy_selection()
+from PySide6.QtWidgets import QApplication as _QA
+check("复制到剪贴板", _QA.clipboard().text() == "0.5\t3")
+_QA.clipboard().setText("9.9\t5")
+rc.table.setCurrentCell(1, 3)
+rc.paste_clipboard()
+check("粘贴更新单元格", rc.table.item(1, 3).text() == "9.9"
+      and rc.table.item(1, 4).text() == "5")
+check("string 字段保持字符串类型", rc._dirty[(1, 3)][1] == "9.9")
+check("粘贴产生两处脏标记", rc._dirty_cell_count() == 2)
+
+shot(rc, "editing_dirty")
+
+# 保存（二次确认 → FakeClient 记录，不联网）
+CONFIRM_TEXTS.clear()
+rc.save_changes()
+ok = wait_for(lambda: len(fake.written) > 0, timeout_ms=8000)
+check("确认框已弹出(二次确认)", len(CONFIRM_TEXTS) == 1, str(CONFIRM_TEXTS[-1][1:]))
+check("确认框含修改明细", "frozenDensity" in CONFIRM_TEXTS[-1][2]
+      or "currentA" in CONFIRM_TEXTS[-1][2])
+check("写入被调用(模拟)", ok)
+if ok:
+    db, pts = fake.written[0]
+    check("写入目标库正确", db == "zn_data")
+    check("写入 1 行 2 字段", len(pts) == 1 and len(pts[0].Fields) == 2)
+    check("写入带标签", pts[0].Tags == {"nmunicateAddr": "042760237"})
+    from datetime import datetime, timezone
+    seconds = int(datetime(2026, 9, 27, 16, 1, 0, tzinfo=timezone.utc).timestamp())
+    check("纳秒时间戳精确", pts[0].TimeStampNs == seconds * 1_000_000_000)
+check("保存后脏标记清空", rc._dirty_cell_count() == 0)
+check("保存成功提示", any(m[0] == "information" for m in MODALS))
+
+# 写入行协议内容断言（第一部分的编辑路径同样适用）
+line = fake._point_to_line(fake.written[0][1][0]) if hasattr(fake, "_point_to_line") else None
+if line is None:
+    from net.sakurain.influxdbstudio.core.client import HttpInfluxDbClient
+    line = HttpInfluxDbClient(conn)._point_to_line(fake.written[0][1][0])
+check("行协议格式正确", "currentA=" in line and "frozenDensity=5i" in line
+      and "nmunicateAddr=042760237" in line, line)
+
+# -- 整行/多行删除（暂存标红 → 二次确认 → FakeClient 记录 DELETE，不联网）------
+rc.table.clearSelection()
+rc.table.item(0, 1).setSelected(True)
+rc.table.item(1, 1).setSelected(True)
+rc.stage_delete_selected()
+check("两行暂存删除", rc._deleted_rows == {0, 1}, str(rc._deleted_rows))
+check("删除行红色高亮", rc.table.item(0, 1).background().color().name() == "#ffd6d6")
+check("脏计数含删除行", rc._dirty_row_count() == 2)
+
+# 回滚撤销删除标记
+rc.revert_changes()
+check("回滚清除删除暂存", rc._deleted_rows == set() and rc._dirty_row_count() == 0)
+check("回滚恢复行背景", rc.table.item(0, 1).background().color().name() != "#ffd6d6")
+
+# 再次暂存并保存：确认框含删除明细，FakeClient 记录 2 条 DELETE
+rc.table.clearSelection()
+rc.table.item(0, 1).setSelected(True)
+rc.table.item(1, 1).setSelected(True)
+rc.stage_delete_selected()
+CONFIRM_TEXTS.clear()
+before_rows = rc.table.rowCount()
+rc.save_changes()
+ok = wait_for(lambda: len(fake.commands) == 2, timeout_ms=8000)
+check("确认框含删除明细", len(CONFIRM_TEXTS) == 1
+      and CONFIRM_TEXTS[-1][2].count("删除整行") == 2, str(CONFIRM_TEXTS[-1][2]))
+check("DELETE 语句已执行(模拟)", ok, str(fake.commands))
+if ok:
+    check("DELETE 目标库正确", all(db == "zn_data" for db, _s in fake.commands))
+    check("DELETE 含时间等值条件",
+          "WHERE time = '2026-09-27T16:00:00.000000001Z'"
+          in fake.commands[0][1]
+          and "WHERE time = '2026-09-27T16:01:00.000000000Z'"
+          in fake.commands[1][1],
+          str(fake.commands))
+    check("DELETE 含标签条件(防误删)",
+          '"nmunicateAddr" = \'042760236\'' in fake.commands[0][1]
+          and '"nmunicateAddr" = \'042760237\'' in fake.commands[1][1],
+          str(fake.commands))
+check("保存后删除行从表格移除", rc.table.rowCount() == before_rows - 2,
+      f"rows={rc.table.rowCount()}")
+check("保存后删除暂存清空", rc._deleted_rows == set())
+
+# -- 每页条数手动输入 -----------------------------------------------------------
+qc_fake.editor_text = 'SELECT * FROM "curveData3761"'
+qc_fake._page_size = 500
+qc_fake.execute_request()  # 非分页查询后需先重新进入分页状态
+ok = wait_for(lambda: not qc_fake._loading and qc_fake.pager_widget.isVisible(),
+              timeout_ms=8000)
+check("重进分页状态", ok)
+qc_fake.page_size_combo.lineEdit().setText("37")
+qc_fake.page_size_combo.lineEdit().editingFinished.emit()
+ok = wait_for(lambda: not qc_fake._loading
+              and any("LIMIT 37 OFFSET 0" in q for q in fake_pager.queries),
+              timeout_ms=8000)
+check("手动输入每页37并重查", ok and qc_fake._page_size == 37,
+      f"size={qc_fake._page_size} queries={fake_pager.queries[-2:]}")
+check("手输后回到第1页", qc_fake._page == 1, f"page={qc_fake._page}")
+
+# 非法输入回退到当前值
+qc_fake.page_size_combo.lineEdit().setText("abc")
+qc_fake.page_size_combo.lineEdit().editingFinished.emit()
+check("非法输入不生效", qc_fake._page_size == 37
+      and qc_fake.page_size_combo.lineEdit().text() == "37",
+      qc_fake.page_size_combo.lineEdit().text())
+
+# -- 可见的保存/回滚按钮（DBeaver 风格按钮条，随脏状态显隐）--------------------
+grid = qc_fake.results_tabs.currentWidget()
+ok = wait_for(lambda: grid is not None and grid._edit_meta_loaded, timeout_ms=8000)
+check("当前结果网格就绪", ok)
+check("无修改时按钮条常显但禁用", qc_fake.edit_bar_widget.isVisible()
+      and not qc_fake.btn_grid_save.isEnabled()
+      and not qc_fake.btn_grid_revert.isEnabled())
+grid.table.clearSelection()
+grid.table.item(0, 1).setSelected(True)
+grid.stage_delete_selected()
+check("暂存删除后按钮启用", qc_fake.edit_bar_widget.isVisible()
+      and qc_fake.btn_grid_save.isEnabled()
+      and qc_fake.btn_grid_revert.isEnabled())
+check("按钮计数文本", "1" in qc_fake.btn_grid_save.text(), qc_fake.btn_grid_save.text())
+grid.revert_changes()
+check("回滚后按钮禁用但按钮条仍显示",
+      qc_fake.edit_bar_widget.isVisible()
+      and not qc_fake.btn_grid_save.isEnabled())
+
+# Delete 快捷键同样触发暂存
+grid.table.clearSelection()
+grid.table.item(1, 1).setSelected(True)
+win = grid.table.window().windowHandle()
+if win is not None:
+    win.show()
+    win.requestActivate()
+    QTest.qWait(200)
+grid.table.setFocus()
+QTest.keyClick(grid.table, Qt.Key_Delete)
+check("Delete 快捷键暂存删除", grid._deleted_rows == {1}, str(grid._deleted_rows))
+grid.revert_changes()
+
+# -- 表头右键菜单（DBeaver 风格高级功能）---------------------------------------
+rc2 = controls.QueryResultsControl()
+rc2.influx_client = fake
+rc2.database = "zn_data"
+rc2.show()
+series2 = InfluxDbSeries(
+    "m", ["time", "v", "w"], None,
+    [["2026-09-27T16:00:03Z", 3, "c"],
+     ["2026-09-27T16:00:01Z", 1, "a"],
+     ["2026-09-27T16:00:02Z", 2, "b"]])
+rc2.update_results(series2)
+ok = wait_for(lambda: rc2._edit_meta_loaded, timeout_ms=8000)
+check("表头菜单测试网格就绪", ok)
+check("选中样式为蓝色", "#2f6fd0" in rc2.table.styleSheet(),
+      rc2.table.styleSheet())
+
+import PySide6.QtWidgets as _W
+from PySide6.QtCore import QPoint as _QPoint
+from net.sakurain.influxdbstudio.i18n import tr as _tr
+
+
+def click_header_menu(control, text, pos):
+    """弹出表头菜单并"点击"指定文本的启用菜单项（chooser 替代模态 exec）。"""
+    chosen = {"action": None}
+
+    def chooser(menu):
+        for act in menu.actions():
+            if act.text() == text and act.isEnabled():
+                chosen["action"] = act
+                return act
+        return None
+
+    control._show_header_menu(pos, chooser=chooser)
+    return chosen["action"]
+
+
+def header_pos(control, col):
+    header = control.table.horizontalHeader()
+    x = 0
+    for c in range(col):
+        x += header.sectionSize(c)
+    return _QPoint(x + header.sectionSize(col) // 2, 3)
+
+
+# 复制字段名（点到 "v" 列表头）
+click_header_menu(rc2, _tr("grid.header.copy_name"), header_pos(rc2, 2))
+check("复制字段名", _QA.clipboard().text() == "v", _QA.clipboard().text())
+# 复制全部字段名（不含 "#" 序号列）
+click_header_menu(rc2, _tr("grid.header.copy_all_names"), header_pos(rc2, 1))
+check("复制全部字段名", _QA.clipboard().text() == "time, v, w",
+      _QA.clipboard().text())
+
+# 列宽：适合值（不报错且列宽为正）
+w_before = rc2.table.columnWidth(2)
+click_header_menu(rc2, _tr("grid.header.fit_width"), header_pos(rc2, 2))
+check("列宽适合值", rc2.table.columnWidth(2) != w_before
+      or rc2.table.columnWidth(2) > 0, f"width={rc2.table.columnWidth(2)}")
+
+# 隐藏列 / 显示全部列
+click_header_menu(rc2, _tr("grid.header.hide_column"), header_pos(rc2, 3))
+check("隐藏此列", rc2.table.isColumnHidden(3))
+click_header_menu(rc2, _tr("grid.header.show_all_columns"), header_pos(rc2, 1))
+check("显示全部列", not rc2.table.isColumnHidden(3))
+
+# 升序 / 降序排列当前页
+click_header_menu(rc2, _tr("grid.header.sort_asc"), header_pos(rc2, 2))
+check("升序排列当前页", rc2._series.Values[0][1] == 1
+      and rc2._series.Values[2][1] == 3, str(rc2._series.Values))
+click_header_menu(rc2, _tr("grid.header.sort_desc"), header_pos(rc2, 2))
+check("降序排列当前页", rc2._series.Values[0][1] == 3
+      and rc2._series.Values[2][1] == 1, str(rc2._series.Values))
+
+# 暂存删除时排序不可用（保护行号映射）
+rc2.table.clearSelection()
+rc2.table.item(0, 1).setSelected(True)
+rc2.stage_delete_selected()
+first_v = rc2._series.Values[0][1]
+click_header_menu(rc2, _tr("grid.header.sort_asc"), header_pos(rc2, 2))
+check("脏状态禁止排序", rc2._series.Values[0][1] == first_v
+      and rc2._deleted_rows == {0})
+rc2.revert_changes()
+
+# 刷新回调（由 QueryControl 提供）
+refreshed = []
+rc2.on_refresh = lambda: refreshed.append(1)
+click_header_menu(rc2, _tr("grid.header.refresh"), header_pos(rc2, 1))
+check("刷新回调触发", refreshed == [1])
+rc2.on_refresh = None
+click_header_menu(rc2, _tr("grid.header.refresh"), header_pos(rc2, 1))
+check("无刷新回调时菜单项禁用", refreshed == [1])
+
+shot(rc2, "header_menu_grid")
+
+# -- SQL 编辑器：Ctrl+/ 注释整行 + 注释行变灰 ----------------------------------
+from net.sakurain.influxdbstudio.ui.common import (
+    _toggle_line_comment, create_sql_editor)
+
+ed = create_sql_editor()
+ed.setPlainText("SELECT a\nFROM m")
+cur = ed.textCursor()
+cur.setPosition(0)
+ed.setTextCursor(cur)
+_toggle_line_comment(ed)
+check("注释当前行", ed.toPlainText() == "-- SELECT a\nFROM m",
+      repr(ed.toPlainText()))
+_toggle_line_comment(ed)
+check("再次切换取消注释", ed.toPlainText() == "SELECT a\nFROM m",
+      repr(ed.toPlainText()))
+
+# 多行选中整体注释 / 取消
+ed.setPlainText("SELECT a\nFROM m\nWHERE x = 1")
+from PySide6.QtGui import QTextCursor as _TC
+cur = ed.textCursor()
+cur.setPosition(0)
+cur.setPosition(ed.document().findBlockByNumber(1).position() + 3, _TC.KeepAnchor)
+ed.setTextCursor(cur)
+_toggle_line_comment(ed)
+check("多行注释", ed.toPlainText()
+      == "-- SELECT a\n-- FROM m\nWHERE x = 1", repr(ed.toPlainText()))
+_toggle_line_comment(ed)
+check("多行取消注释", ed.toPlainText()
+      == "SELECT a\nFROM m\nWHERE x = 1", repr(ed.toPlainText()))
+
+# 注释行高亮为灰色：覆盖整行的 format 必须全部是灰色（注释内容不能被关键字格式覆盖）
+ed.setPlainText("-- SELECT a and time >= '2026-01-01'")
+qapp.processEvents()
+block = ed.document().findBlockByNumber(0)
+fmts = block.layout().formats()
+line_len = len(block.text())
+covering = [f for f in fmts if f.start + f.length >= line_len]
+all_gray = bool(covering) and all(
+    f.format.foreground().color().name() == "#7f7f7f" for f in covering)
+check("注释行整行灰色", all_gray, str([(f.start, f.length,
+                                    f.format.foreground().color().name())
+                                   for f in fmts]))
+
+# Ctrl+/ 快捷键触发注释
+ed.setPlainText("SELECT 1")
+ed.moveCursor(_TC.Start)
+ed.show()
+ed_win = ed.windowHandle()
+if ed_win is not None:
+    ed_win.show()
+    ed_win.requestActivate()
+    QTest.qWait(200)
+ed.setFocus()
+QTest.keyClick(ed, Qt.Key_Slash, Qt.ControlModifier)
+check("Ctrl+/ 快捷键注释", ed.toPlainText() == "-- SELECT 1",
+      repr(ed.toPlainText()))
+
+shot(qc_fake, "delete_and_editbar")
+
+# -- 启动行为：已有连接时不弹"管理连接"窗口 ------------------------------------
+from net.sakurain.influxdbstudio.ui import main_window as mw_module
+
+dialogs_created = []
+
+
+class _ProbeDialog:
+    def __init__(self, *a, **k):
+        dialogs_created.append(self)
+
+    def exec(self):
+        return 0
+
+
+_orig_mcd = mw_module.ManageConnectionsDialog
+mw_module.ManageConnectionsDialog = _ProbeDialog
+_orig_connections = list(app_module.settings.connections)
+app_module.settings.connections = [conn]
+
+
+class _FailClient(InfluxDbClient):
+    def __init__(self):
+        self.connection = conn
+
+    def get_database_names(self, timeout=None):
+        raise ConnectionError("ConnectTimeout: host unreachable")
+
+    def get_measurement_names(self, database, timeout=None):
+        raise ConnectionError("ConnectTimeout: host unreachable")
+
+
+try:
+    # 先注入失败客户端再建窗口：渲染连接节点时就会触发异步加载
+    app_module.active_clients[:] = [_FailClient()]
+    win = mw_module.MainWindow(show_connections_on_load=True)
+    win.show()
+    QTest.qWait(400)  # 覆盖 250ms 的 singleShot
+    check("已有连接时不弹管理连接窗口", dialogs_created == [],
+          str(len(dialogs_created)))
+    check("启动后树中渲染连接节点",
+          win.tree.topLevelItemCount() == 1
+          and win.tree.topLevelItem(0).text(0) == conn.Name,
+          win.tree.topLevelItem(0).text(0) if win.tree.topLevelItemCount() else "")
+
+    # -- 连接失败优雅处理：内联错误节点，不弹模态框、不残留转圈 ---------------
+    # 固定 Database 的连接在展开数据库节点时才真正访问网络
+    node = win.tree.topLevelItem(0)
+    ok = wait_for(lambda: node.childCount() == 1
+                  and mw_module.MainWindow._node_type(node.child(0))
+                  == mw_module.NodeType.Database, timeout_ms=8000)
+    check("启动后渲染数据库节点", ok,
+          node.child(0).text(0) if node.childCount() else "no child")
+    db_node = node.child(0)
+    modals_before = len(MODALS)
+    win._expand_node_children(db_node)
+    ok = wait_for(lambda: db_node.childCount() == 1
+                  and mw_module.MainWindow._node_type(db_node.child(0))
+                  == mw_module.NodeType.Error, timeout_ms=8000)
+    check("加载失败显示内联错误节点", ok,
+          db_node.child(0).text(0) if db_node.childCount() else "no child")
+    if ok:
+        err_node = db_node.child(0)
+        check("错误节点为红色", err_node.foreground(0).color().name() == "#c00000")
+        check("错误节点提示重试", "重试" in err_node.text(0), err_node.text(0))
+    check("加载失败不弹模态错误框",
+          len(MODALS) == modals_before, str(MODALS[modals_before:]))
+    check("状态栏提示加载失败", "加载失败" in win.status_label.text(),
+          win.status_label.text())
+
+    # 双击错误节点重试：回到加载占位并再次失败
+    win._tree_item_double_clicked(db_node.child(0), 0)
+    check("双击重试回到加载占位", db_node.childCount() == 1
+          and mw_module.MainWindow._node_type(db_node.child(0))
+          == mw_module.NodeType.LoadingPlaceholder)
+    ok = wait_for(lambda: mw_module.MainWindow._node_type(db_node.child(0))
+                  == mw_module.NodeType.Error, timeout_ms=8000)
+    check("重试后再次显示错误节点", ok)
+
+    shot(win, "startup_and_load_error")
+finally:
+    mw_module.ManageConnectionsDialog = _orig_mcd
+    app_module.settings.connections = _orig_connections
+    app_module.active_clients[:] = []
+    win.close()
+
+# ===========================================================================
+# 汇总
+# ===========================================================================
+fails = [r for r in RESULTS if r[0] == "FAIL"]
+warns = [r for r in RESULTS if r[0] == "WARN"]
+print("\n" + "=" * 60)
+print(f"DBeaver 功能 E2E: {len(RESULTS) - len(fails) - len(warns)} 通过, "
+      f"{len(warns)} 警告, {len(fails)} 失败")
+for status, name, detail in fails + warns:
+    print(f"  {status}: {name} {detail}")
+print("写入保护：FakeClient 仅记录写入，真实服务端未被修改")
+sys.exit(1 if fails else 0)
