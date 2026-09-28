@@ -27,4 +27,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"net.sakurain.influxdbstudio" = ["resources/icons/*.png", "resources/*.ico"]
+"net.sakurain.influxdbstudio" = ["resources/icons/*.png", "resources/*.ico", "resources/*.png"]

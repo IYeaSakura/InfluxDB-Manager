@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 
@@ -18,6 +19,7 @@ def main() -> int:
     from . import __version__, app as app_module
     from .core.settings import AppSettings
     from .i18n import set_language, tr
+    from .ui.common import resource_path
     from .ui.main_window import MainWindow
 
     qapp = QApplication(sys.argv)
@@ -25,11 +27,13 @@ def main() -> int:
     qapp.setApplicationDisplayName("InfluxDB Manager")
     qapp.setOrganizationName("InfluxDBStudio")
 
-    # Application / taskbar icon (sakurain.ico). On Windows the taskbar icon
-    # additionally requires an explicit AppUserModelID.
-    icon_path = Path(__file__).resolve().parent / "resources" / "sakurain.ico"
-    if icon_path.exists():
-        qapp.setWindowIcon(QIcon(str(icon_path)))
+    # Application / taskbar icon (sakurain.png; PNG is built into QtGui and
+    # works in trimmed PyInstaller bundles without the qico image plugin).
+    # On Windows the taskbar icon additionally requires an explicit
+    # AppUserModelID.
+    icon_file = Path(resource_path("sakurain.png"))
+    if icon_file.exists():
+        qapp.setWindowIcon(QIcon(str(icon_file)))
     if sys.platform == "win32":
         try:
             import ctypes
@@ -46,6 +50,15 @@ def main() -> int:
 
     window = MainWindow()
     window.setWindowIcon(qapp.windowIcon())
+
+    # Self-test mode (used by packaging tests): report whether the app icon
+    # resolved, then exit without entering the event loop.
+    if os.environ.get("INFLUXDB_MANAGER_SELFTEST"):
+        ok = not qapp.windowIcon().isNull()
+        print(f"SELFTEST icon_loaded={ok} icon_file={icon_file} "
+              f"exists={icon_file.exists()}")
+        return 0 if ok else 1
+
     window.show()
     return qapp.exec()
 

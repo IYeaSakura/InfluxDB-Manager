@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
@@ -14,19 +15,33 @@ log = logging.getLogger("net.sakurain.influxdbstudio.ui")
 
 CHECK_MARK = "✓"
 
-_ICONS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "resources", "icons")
-_RESOURCES_DIR = os.path.dirname(_ICONS_DIR)
+
+def resources_dir() -> str:
+    """Absolute path to the package resources directory.
+
+    Frozen (PyInstaller) builds extract data files under ``sys._MEIPASS``
+    with the same relative layout, so both cases share one code path.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.join(sys._MEIPASS, "net", "sakurain",
+                            "influxdbstudio", "resources")
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), "resources")
+
 
 _icon_cache: dict = {}
 
 
+def icons_dir() -> str:
+    return os.path.join(resources_dir(), "icons")
+
+
 def icon_path(name: str) -> str:
-    return os.path.join(_ICONS_DIR, name + ".png")
+    return os.path.join(icons_dir(), name + ".png")
 
 
 def resource_path(name: str) -> str:
     """Absolute path to a file inside the package resources directory."""
-    return os.path.join(_RESOURCES_DIR, name)
+    return os.path.join(resources_dir(), name)
 
 
 def load_icon(name: str):

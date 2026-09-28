@@ -1024,7 +1024,7 @@ class AboutDialog(QDialog):
 
         layout = QVBoxLayout(self)
         logo = QLabel()
-        pixmap = QPixmap(resource_path("sakurain.ico"))
+        pixmap = QPixmap(resource_path("sakurain.png"))
         if not pixmap.isNull():
             logo.setPixmap(pixmap.scaledToWidth(96, Qt.SmoothTransformation))
         logo.setAlignment(Qt.AlignCenter)

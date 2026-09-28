@@ -32,6 +32,8 @@ a = Analysis(
         'PySide6.QtQuick3D', 'PySide6.QtQuickControls2', 'PySide6.QtQuickEffects',
         'PySide6.QtQuickTest', 'PySide6.QtQuickTimeline', 'PySide6.QtLabsPlatform',
         'PySide6.QtShaderTools', 'PySide6.QtHttpServer', 'PySide6.QtDesigner',
+        # Pillow is a build-time tool only (icon conversion); never bundled.
+        'PIL',
     ],
     noarchive=False,
     optimize=0,

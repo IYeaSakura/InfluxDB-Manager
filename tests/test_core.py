@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 
 import pytest
@@ -273,3 +274,35 @@ class TestI18n:
             assert i18n.tr("drop.database.confirm", name="x") == "Drop database: x?"
         finally:
             i18n.set_language("zh_CN")
+
+
+# ---------------------------------------------------------------------------
+# Resource path resolution (source tree + frozen/PyInstaller layout)
+# ---------------------------------------------------------------------------
+
+class TestResourcePaths:
+    def test_icons_dir_contains_tree_icons(self):
+        from net.sakurain.influxdbstudio.ui.common import icons_dir, icon_path
+        assert os.path.isdir(icons_dir())
+        assert os.path.isfile(icon_path("Connection"))
+        assert os.path.isfile(icon_path("Refresh"))
+
+    def test_app_icon_png_exists(self):
+        from net.sakurain.influxdbstudio.ui.common import resource_path
+        p = resource_path("sakurain.png")
+        assert os.path.isfile(p)
+
+    def test_frozen_mode_uses_meipass(self, monkeypatch):
+        from net.sakurain.influxdbstudio.ui import common
+        monkeypatch.setattr(common.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(common.sys, "_MEIPASS", r"C:\tmp\_MEI12345",
+                            raising=False)
+        try:
+            assert common.resources_dir() == os.path.join(
+                r"C:\tmp\_MEI12345", "net", "sakurain", "influxdbstudio",
+                "resources")
+            assert common.resource_path("sakurain.png") == os.path.join(
+                r"C:\tmp\_MEI12345", "net", "sakurain", "influxdbstudio",
+                "resources", "sakurain.png")
+        finally:
+            monkeypatch.undo()
