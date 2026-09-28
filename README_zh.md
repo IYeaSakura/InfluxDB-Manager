@@ -13,7 +13,7 @@
 
 InfluxDB（1.x 时序数据库）的桌面 UI 管理工具 —— **参考**原 [CymaticLabs/InfluxDBStudio](https://github.com/CymaticLabs/InfluxDBStudio)（C#/WinForms），使用 **Python/PySide6 重构**，并新增了更多功能：类 DBeaver 的结果网格编辑、数据分页、整行删除、查询脚本持久化，以及**中英双语界面（默认中文）**。
 
-**作者**：Yuyang.Wang | **仓库**：[IYeaSakura/InfluxDBStudio](https://github.com/IYeaSakura/InfluxDBStudio)
+**作者**：Yuyang.Wang | **仓库**：[IYeaSakura/InfluxDB-Manager](https://github.com/IYeaSakura/InfluxDB-Manager)
 
 [功能特性](#功能特性) | [技术栈](#技术栈) | [项目结构](#项目结构) | [快速开始](#快速开始) | [使用指南](#使用指南) | [开发指南](#开发指南) | [构建与部署](#构建与部署) | [核心设计](#核心设计) | [测试](#测试) | [常见问题](#常见问题) | [参与贡献](#参与贡献) | [许可证](#许可证)
 
@@ -160,7 +160,7 @@ InfluxDBStudio/
 
 ```bash
 # 克隆仓库
-git clone https://github.com/IYeaSakura/InfluxDBStudio.git
+git clone https://github.com/IYeaSakura/InfluxDB-Manager.git
 cd InfluxDBStudio
 
 # 在项目根目录创建并激活虚拟环境
@@ -509,7 +509,7 @@ SOFTWARE.
 - **网站**：[https://sakurain.net](https://sakurain.net)
 - **邮箱**：[Yae_SakuRain@outlook.com](mailto:Yae_SakuRain@outlook.com)
 - **GitHub**：[https://github.com/IYeaSakura](https://github.com/IYeaSakura)
-- **仓库**：[https://github.com/IYeaSakura/InfluxDBStudio](https://github.com/IYeaSakura/InfluxDBStudio)
+- **仓库**：[https://github.com/IYeaSakura/InfluxDB-Manager](https://github.com/IYeaSakura/InfluxDB-Manager)
 
 ---
 

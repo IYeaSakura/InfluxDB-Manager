@@ -1046,7 +1046,7 @@ class AboutDialog(QDialog):
         description.setWordWrap(True)
         layout.addWidget(description)
 
-        link = QLabel(f'<a href="https://github.com/IYeaSakura/InfluxDBStudio">'
+        link = QLabel(f'<a href="https://github.com/IYeaSakura/InfluxDB-Manager">'
                       f'{tr("about.project_page")}</a>')
         link.setOpenExternalLinks(True)
         layout.addWidget(link)

@@ -13,7 +13,7 @@
 
 A desktop UI management tool for InfluxDB (1.x time series database) — inspired by the original [CymaticLabs/InfluxDBStudio](https://github.com/CymaticLabs/InfluxDBStudio) (C#/WinForms), **rebuilt from scratch in Python/PySide6** and extended with a host of new features: DBeaver-style result grid editing, pagination, row deletion, persisted query scripts, and a bilingual UI (**Chinese by default**, English available).
 
-**Author**: Yuyang.Wang | **Repository**: [IYeaSakura/InfluxDBStudio](https://github.com/IYeaSakura/InfluxDBStudio)
+**Author**: Yuyang.Wang | **Repository**: [IYeaSakura/InfluxDB-Manager](https://github.com/IYeaSakura/InfluxDB-Manager)
 
 [Features](#features) | [Tech Stack](#tech-stack) | [Project Structure](#project-structure) | [Getting Started](#getting-started) | [Usage](#usage) | [Development](#development) | [Build & Deployment](#build--deployment) | [Core Design](#core-design) | [Testing](#testing) | [Troubleshooting](#troubleshooting) | [Contributing](#contributing) | [License](#license)
 
@@ -160,7 +160,7 @@ InfluxDBStudio/
 
 ```bash
 # Clone the repository
-git clone https://github.com/IYeaSakura/InfluxDBStudio.git
+git clone https://github.com/IYeaSakura/InfluxDB-Manager.git
 cd InfluxDBStudio
 
 # Create and activate a virtual environment in the project root
@@ -509,7 +509,7 @@ This project is built with the help of many open-source projects:
 - **Website**: [https://sakurain.net](https://sakurain.net)
 - **Email**: [Yae_SakuRain@outlook.com](mailto:Yae_SakuRain@outlook.com)
 - **GitHub**: [https://github.com/IYeaSakura](https://github.com/IYeaSakura)
-- **Repository**: [https://github.com/IYeaSakura/InfluxDBStudio](https://github.com/IYeaSakura/InfluxDBStudio)
+- **Repository**: [https://github.com/IYeaSakura/InfluxDB-Manager](https://github.com/IYeaSakura/InfluxDB-Manager)
 
 ---
 

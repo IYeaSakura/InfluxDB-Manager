@@ -4,7 +4,7 @@
 #define MyAppName      "InfluxDB Manager"
 #define MyAppVersion   "1.0.0"
 #define MyAppPublisher "net.sakurain"
-#define MyAppURL       "https://github.com/IYeaSakura/InfluxDBStudio"
+#define MyAppURL       "https://github.com/IYeaSakura/InfluxDB-Manager"
 #define MyAppExeName   "InfluxDBManager.exe"
 
 [Setup]

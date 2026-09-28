@@ -348,7 +348,7 @@ _zh_CN = {
     "about.version": "版本 {version}",
     "about.description": "InfluxDB（时序数据库）的 UI 管理工具。\n\n"
                          "参考原项目 InfluxDB Studio (CymaticLabs, MIT)，使用 Python/PySide6 重构，并新增了更多功能。",
-    "about.project_page": "项目主页 (IYeaSakura/InfluxDBStudio)",
+    "about.project_page": "项目主页 (IYeaSakura/InfluxDB-Manager)",
     "about.origin": "原始项目",
 
     # -- 状态栏与其他 --------------------------------------------------------------------
@@ -702,7 +702,7 @@ _en_US = {
     "about.version": "Version {version}",
     "about.description": "A UI management tool for the InfluxDB time series database.\n\n"
                          "Python/PySide6 rebuild inspired by the original InfluxDB Studio (CymaticLabs, MIT), with many new features added.",
-    "about.project_page": "Project Page (IYeaSakura/InfluxDBStudio)",
+    "about.project_page": "Project Page (IYeaSakura/InfluxDB-Manager)",
     "about.origin": "Original Project",
 
     # -- Status bar & misc ----------------------------------------------------------------------------------------
