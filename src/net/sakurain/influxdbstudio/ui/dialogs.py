@@ -37,6 +37,7 @@ from ..core.models import (
     InfluxDbConnection,
     InfluxDbCqParams,
     InfluxDbFillTypes,
+    InfluxDbPoint,
     InfluxDbPrivileges,
     InfluxDbRetentionPolicy,
     InfluxDbUser,
@@ -106,6 +107,10 @@ class ConnectionDialog(QDialog):
         self.use_ssl_check = QCheckBox(tr("conn.dialog.use_ssl"))
         form.addRow("", self.use_ssl_check)
 
+        # 1.2.0: read-only connection blocks every data-modifying action
+        self.read_only_check = QCheckBox(tr("conn.dialog.read_only"))
+        form.addRow("", self.read_only_check)
+
         buttons = QDialogButtonBox(Qt.Horizontal)
         self.test_button = buttons.addButton(tr("test"), QDialogButtonBox.ActionRole)
         self.ping_button = buttons.addButton(tr("ping"), QDialogButtonBox.ActionRole)
@@ -161,6 +166,12 @@ class ConnectionDialog(QDialog):
     def set_use_ssl(self, value: bool) -> None:
         self.use_ssl_check.setChecked(bool(value))
 
+    def read_only(self) -> bool:
+        return self.read_only_check.isChecked()
+
+    def set_read_only(self, value: bool) -> None:
+        self.read_only_check.setChecked(bool(value))
+
     # -- commands ---------------------------------------------------------------
 
     def reset_values(self) -> None:
@@ -172,6 +183,7 @@ class ConnectionDialog(QDialog):
         self.set_username("")
         self.set_password("")
         self.set_use_ssl(False)
+        self.set_read_only(False)
 
     def bind_to_connection(self, connection: InfluxDbConnection) -> None:
         self.connection_id = connection.Id
@@ -182,6 +194,7 @@ class ConnectionDialog(QDialog):
         self.set_username(connection.Username)
         self.set_password(connection.Password)
         self.set_use_ssl(connection.UseSsl)
+        self.set_read_only(connection.ReadOnly)
 
     def create_connection(self) -> InfluxDbConnection:
         return InfluxDbConnection.create(
@@ -199,6 +212,7 @@ class ConnectionDialog(QDialog):
         connection.Username = self.username() or None
         connection.Password = self.password() or None
         connection.UseSsl = self.use_ssl()
+        connection.ReadOnly = self.read_only()
 
     # -- test / ping ---------------------------------------------------------------
 
@@ -1154,3 +1168,233 @@ def run_export_dialog(suggest_name, columns, rows,
         parent, tr("export.success.title"),
         tr("export.success", n=len(rows), path=path))
     return len(rows)
+
+
+# ---------------------------------------------------------------------------
+# Server-side column filter dialog (1.2.0)
+# ---------------------------------------------------------------------------
+
+class FilterDialog(QDialog):
+    """Pick an operator and value for one column; ``condition`` is
+    ``(column, op, value)`` on accept."""
+
+    OPERATORS = ["=", "!=", ">", ">=", "<", "<=", "=~", "!~"]
+
+    def __init__(self, column: str, parent: QWidget = None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("filter.dialog.title"))
+        self.column = column
+        self.condition = None
+
+        form = QFormLayout(self)
+        form.addRow(tr("filter.column"), QLabel(column))
+        self.op_combo = QComboBox()
+        self.op_combo.addItems(self.OPERATORS)
+        self.op_combo.setCurrentIndex(0)
+        form.addRow(tr("filter.op"), self.op_combo)
+        self.value_edit = QLineEdit()
+        self.value_edit.setPlaceholderText(tr("filter.value.tip"))
+        form.addRow(tr("filter.value"), self.value_edit)
+        tip = _info_label("filter.value.tip")
+        form.addRow("", tip)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def _on_accept(self) -> None:
+        value = self.value_edit.text().strip()
+        if not value:
+            display_error(tr("filter.invalid"), parent=self)
+            return
+        self.condition = (self.column, self.op_combo.currentText(), value)
+        self.accept()
+
+
+# ---------------------------------------------------------------------------
+# Query history dialog (1.2.0)
+# ---------------------------------------------------------------------------
+
+class QueryHistoryDialog(QDialog):
+    """Browse the executed queries of the current connection; double-click
+    (or 回填) loads the selected entry into the editor."""
+
+    def __init__(self, entries: list, connection_id: str,
+                 parent: QWidget = None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("history.dialog.title"))
+        self.resize(560, 360)
+        self.connection_id = connection_id
+        self.selected_entry = None
+        self._entries = list(entries)
+
+        layout = QVBoxLayout(self)
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels([
+            tr("history.column.time"), tr("history.column.database"),
+            tr("history.column.query")])
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.itemDoubleClicked.connect(lambda _i: self._load())
+        layout.addWidget(self.table, 1)
+
+        buttons = QHBoxLayout()
+        self.load_button = QPushButton(tr("history.load"))
+        self.delete_button = QPushButton(tr("history.delete"))
+        self.clear_button = QPushButton(tr("history.clear"))
+        close_button = QPushButton(tr("history.close"))
+        self.load_button.clicked.connect(self._load)
+        self.delete_button.clicked.connect(self._delete_selected)
+        self.clear_button.clicked.connect(self._clear)
+        close_button.clicked.connect(self.reject)
+        for b in (self.load_button, self.delete_button, self.clear_button,
+                  close_button):
+            buttons.addWidget(b)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        self._reload()
+
+    def _reload(self) -> None:
+        self.table.setRowCount(0)
+        for entry in self._entries:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(
+                str(entry.get("Time", ""))))
+            self.table.setItem(row, 1, QTableWidgetItem(
+                str(entry.get("Database", ""))))
+            text = str(entry.get("Text", ""))
+            self.table.setItem(row, 2, QTableWidgetItem(
+                text[:200] + ("…" if len(text) > 200 else "")))
+        self.table.resizeColumnsToContents()
+
+    def _current_entry(self):
+        row = self.table.currentRow()
+        return self._entries[row] if 0 <= row < len(self._entries) else None
+
+    def _load(self) -> None:
+        entry = self._current_entry()
+        if entry is None:
+            return
+        self.selected_entry = entry
+        self.accept()
+
+    def _persist(self) -> None:
+        from ..app import settings
+        keep_ids = {id(e) for e in self._entries}
+        settings.query_history = [
+            h for h in settings.query_history if id(h) in keep_ids]
+        settings.save_all()
+
+    def _delete_selected(self) -> None:
+        entry = self._current_entry()
+        if entry is None:
+            return
+        self._entries.remove(entry)
+        self._persist()
+        self._reload()
+
+    def _clear(self) -> None:
+        self._entries = []
+        self._persist()
+        self._reload()
+
+
+# ---------------------------------------------------------------------------
+# Write point dialog (1.2.0) — the C# version's never-implemented feature
+# ---------------------------------------------------------------------------
+
+class WritePointDialog(QDialog):
+    """Compose a single point (measurement + tags + fields + time) and
+    preview its line protocol before writing."""
+
+    def __init__(self, database: str, measurement: str = "",
+                 parent: QWidget = None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("write.dialog.title"))
+        self.point = None
+        self.database = database
+
+        form = QFormLayout(self)
+        self.measurement_edit = QLineEdit(measurement)
+        form.addRow(tr("write.measurement"), self.measurement_edit)
+        self.tags_edit = QLineEdit()
+        self.tags_edit.setPlaceholderText(tr("write.tags.tip"))
+        form.addRow(tr("write.tags"), self.tags_edit)
+        self.fields_edit = QLineEdit()
+        self.fields_edit.setPlaceholderText(tr("write.fields.tip"))
+        form.addRow(tr("write.fields"), self.fields_edit)
+        self.time_edit = QLineEdit()
+        self.time_edit.setPlaceholderText(tr("write.time.tip"))
+        form.addRow(tr("write.time"), self.time_edit)
+        self.rp_edit = QLineEdit()
+        form.addRow(tr("write.rp"), self.rp_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText(tr("write.next"))
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    # -- parsing ----------------------------------------------------------------
+
+    @staticmethod
+    def _parse_kv(text: str) -> dict:
+        """Parse ``k=v, k2=v2`` into a dict (values stay strings)."""
+        result = {}
+        text = (text or "").strip()
+        if not text:
+            return result
+        for part in text.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "=" not in part:
+                raise ValueError(part)
+            key, _, value = part.partition("=")
+            key = key.strip().strip('"')
+            if not key:
+                raise ValueError(part)
+            result[key] = value.strip().strip("'").strip('"')
+        return result
+
+    def _on_accept(self) -> None:
+        from ..core import query_tools
+        measurement = self.measurement_edit.text().strip()
+        if not measurement:
+            display_error(tr("write.no_measurement"), parent=self)
+            return
+        try:
+            tags = self._parse_kv(self.tags_edit.text())
+        except ValueError as ex:
+            display_error(tr("write.bad_kv", part=str(ex)), parent=self)
+            return
+        try:
+            fields_raw = self._parse_kv(self.fields_edit.text())
+        except ValueError as ex:
+            display_error(tr("write.bad_kv", part=str(ex)), parent=self)
+            return
+        if not fields_raw:
+            display_error(tr("write.no_fields"), parent=self)
+            return
+        fields = {k: query_tools.parse_edited_value(v)
+                  for k, v in fields_raw.items()}
+        time_text = self.time_edit.text().strip()
+        time_stamp = None
+        ns = None
+        if time_text:
+            ns = query_tools.timestamp_to_ns(time_text)
+            if ns is None:
+                display_error(tr("write.bad_time"), parent=self)
+                return
+            from datetime import datetime, timezone
+            time_stamp = datetime.fromtimestamp(ns / 1e9, tz=timezone.utc)
+        self.point = InfluxDbPoint(
+            measurement, tags, fields, time_stamp, time_stamp_ns=ns)
+        self.accept()
+
+    def retention_policy(self) -> Optional[str]:
+        return self.rp_edit.text().strip() or None

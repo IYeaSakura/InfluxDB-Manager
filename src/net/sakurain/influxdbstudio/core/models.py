@@ -66,6 +66,8 @@ class InfluxDbConnection:
     Username: Optional[str] = None
     Password: Optional[str] = None
     UseSsl: bool = False
+    # 1.2.0: read-only connections block every data-modifying UI action
+    ReadOnly: bool = False
 
     @property
     def http_connection_string(self) -> str:
@@ -91,6 +93,7 @@ class InfluxDbConnection:
             Password=data.get("Password") or data.get("password"),
             UseSsl=bool(data.get("UseSsl") if data.get("UseSsl") is not None
                         else data.get("useSsl", False)),
+            ReadOnly=bool(data.get("ReadOnly", False)),
         )
 
     def to_dict(self) -> dict:
@@ -105,6 +108,7 @@ class InfluxDbConnection:
             "Username": self.Username,
             "Password": self.Password,
             "UseSsl": self.UseSsl,
+            "ReadOnly": self.ReadOnly,
         }
 
 

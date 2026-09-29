@@ -18,6 +18,7 @@ from PySide6.QtGui import QColor, QIntValidator, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
@@ -64,6 +65,9 @@ def _cell_text(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
+
+
+FILTER_CHIP_CLOSE = "×"
 
 
 class RequestControl(QWidget):
@@ -126,6 +130,12 @@ class QueryResultsControl(RequestControl):
         # set by QueryControl: re-runs the original (unpaginated) query and
         # returns (columns, rows) for export-all; None falls back to the grid
         self.export_all_fetcher = None
+        # 1.2.0: read-only connection — every data-modifying action is blocked
+        self.read_only = False
+        # called with the column name to open the server-side filter dialog
+        self.on_filter_request = None
+        # called with `descending: bool` to re-run with ORDER BY time injected
+        self.on_server_time_sort = None
         self._guard = False
 
         layout = QVBoxLayout(self)
@@ -154,6 +164,12 @@ class QueryResultsControl(RequestControl):
         self.splitter.addWidget(self.table)
         self._delegate = _GridDelegate(self)
         self.table.setItemDelegate(self._delegate)
+        # 1.2.0: DBeaver-like calc panel — stats of the numeric selection
+        self.calc_label = QLabel("")
+        self.calc_label.setStyleSheet("color: #666; padding: 1px 4px;")
+        self.calc_label.setTextFormat(Qt.PlainText)
+        layout.addWidget(self.calc_label)
+        self.table.itemSelectionChanged.connect(self._update_calc_panel)
 
         self.splitter.setSizes([0, 400])
         self._sync_tag_panel()
@@ -189,6 +205,14 @@ class QueryResultsControl(RequestControl):
         act_hide = menu.addAction(tr("grid.header.hide_column"))
         act_hide.setEnabled(col > 0)
         act_show_all = menu.addAction(tr("grid.header.show_all_columns"))
+        act_filter = menu.addAction(tr("grid.header.filter"))
+        act_filter.setEnabled(col > 0 and self.on_filter_request is not None)
+        # InfluxQL 1.x only supports ORDER BY time: offer the re-query sort
+        # for the time column only (other columns keep the client-side sort).
+        act_sort_time = None
+        if col > 0 and col - 1 < len(self._columns) \
+                and self._columns[col - 1].lower() == "time":
+            act_sort_time = menu.addAction(tr("grid.header.sort_time_desc"))
         menu.addSeparator()
         act_refresh = menu.addAction(tr("grid.header.refresh"))
         act_refresh.setEnabled(self.on_refresh is not None)
@@ -221,8 +245,40 @@ class QueryResultsControl(RequestControl):
         elif action is act_refresh:
             if callable(self.on_refresh):
                 self.on_refresh()
+        elif action is act_filter:
+            if callable(self.on_filter_request):
+                col_name = self._columns[col - 1]
+                col_type = self._field_types.get(col_name, "")
+                numeric = col_type.lower() in ("float", "integer", "int") \
+                    and col_name not in self._tag_columns
+                self.on_filter_request(col_name, numeric)
+        elif act_sort_time is not None and action is act_sort_time:
+            if callable(self.on_server_time_sort):
+                self.on_server_time_sort(True)
         elif action is act_export:
             self.export_rows_interactive(False)
+
+    # -- calc panel (1.2.0) ---------------------------------------------------
+
+    def _update_calc_panel(self) -> None:
+        """Show aggregate stats for the numeric part of the selection."""
+        numbers = []
+        for item in self.table.selectedItems():
+            if item.column() == 0:
+                continue
+            try:
+                numbers.append(float(item.text()))
+            except (TypeError, ValueError):
+                continue
+        if not numbers:
+            self.calc_label.setText("")
+            self.calc_label.setVisible(False)
+            return
+        self.calc_label.setText(
+            tr("calc.panel",
+               n=len(numbers), avg=sum(numbers) / len(numbers),
+               total=sum(numbers), lo=min(numbers), hi=max(numbers)))
+        self.calc_label.setVisible(True)
 
     def sort_by_column(self, col: int, ascending: bool) -> None:
         """Sort the loaded rows of this page by a column (client-side).
@@ -277,13 +333,13 @@ class QueryResultsControl(RequestControl):
                        and 0 <= r < len(self._series.Values)}
         act_delete = menu.addAction(
             tr("grid.delete_rows", n=len(selected_rows)))
-        act_delete.setEnabled(bool(selected_rows))
+        act_delete.setEnabled(bool(selected_rows) and not self.read_only)
         menu.addSeparator()
         dirty_rows = self._dirty_row_count()
         act_save = menu.addAction(tr("grid.save_changes", n=dirty_rows))
         act_revert = menu.addAction(tr("grid.revert_changes"))
-        act_save.setEnabled(dirty_rows > 0)
-        act_revert.setEnabled(dirty_rows > 0)
+        act_save.setEnabled(dirty_rows > 0 and not self.read_only)
+        act_revert.setEnabled(dirty_rows > 0 and not self.read_only)
         menu.addSeparator()
         # 仅当选中了行（单行或多行）时显示导出入口；「导出全部」固定在编辑栏按钮上
         act_export_sel = None
@@ -309,6 +365,8 @@ class QueryResultsControl(RequestControl):
     # -- cell editing (DBeaver-like) -------------------------------------------
 
     def is_editable_cell(self, row: int, col: int) -> bool:
+        if self.read_only:
+            return False
         if col <= 0 or not self._edit_meta_loaded or self._series is None:
             return False
         if col - 1 >= len(self._columns):
@@ -358,6 +416,9 @@ class QueryResultsControl(RequestControl):
 
     def stage_delete_selected(self) -> None:
         """Mark all fully/partially selected result rows for deletion."""
+        if self.read_only:
+            display_error(tr("read_only.blocked"), parent=self)
+            return
         rows = {i.row() for i in self.table.selectedItems()}
         rows = {r for r in rows
                 if self._series is not None and 0 <= r < len(self._series.Values)}
@@ -451,6 +512,9 @@ class QueryResultsControl(RequestControl):
 
     def save_changes(self) -> None:
         """Second-confirmation save: overwrites + staged row deletions."""
+        if self.read_only:
+            display_error(tr("read_only.blocked"), parent=self)
+            return
         if (not self._dirty and not self._deleted_rows) or self._series is None:
             return
         per_row: Dict[int, Dict[str, Any]] = {}
@@ -568,6 +632,9 @@ class QueryResultsControl(RequestControl):
     def _load_edit_meta(self) -> None:
         """Fetch field/tag keys so only true field columns are editable."""
         if self._edit_meta_loaded or self._edit_meta_loading:
+            return
+        if self.read_only:
+            self._edit_meta_loaded = True  # nothing is editable anyway
             return
         if (self.influx_client is None or not self.database
                 or self._series is None or not self._series.Name):
@@ -728,6 +795,11 @@ class QueryControl(RequestControl):
         self._total: Optional[int] = None
         self._paginating = False
         self._loading = False
+        # 1.2.0: server-side filters (chips) and ORDER BY time direction
+        self._filters: List[dict] = []       # {"column", "op", "value"}
+        self._time_order: Optional[bool] = None  # True = DESC
+        self.read_only = False               # propagated to result grids
+        self.connection_id = ""              # for the query history
         # Query script identity (persisted across launches by the main window)
         self.script_name = ""
         self.script_connection_id = ""
@@ -750,6 +822,15 @@ class QueryControl(RequestControl):
 
         self.results_label = QLabel()
         results_layout.addWidget(self.results_label)
+
+        # -- server-side filter chip bar (1.2.0) --------------------------------
+        self.filter_bar = QWidget()
+        self.filter_layout = QHBoxLayout(self.filter_bar)
+        self.filter_layout.setContentsMargins(4, 0, 4, 0)
+        self.filter_layout.setSpacing(4)
+        self.filter_layout.addStretch(1)
+        self.filter_bar.setVisible(False)
+        results_layout.addWidget(self.filter_bar)
 
         # -- pagination bar ---------------------------------------------------
         pager = QHBoxLayout()
@@ -793,12 +874,16 @@ class QueryControl(RequestControl):
         self.btn_grid_save = QPushButton()
         self.btn_grid_revert = QPushButton()
         self.btn_grid_export = QPushButton(tr("query.export.all"))
+        self.btn_grid_history = QPushButton(tr("query.history"))
+        self.btn_grid_history.setVisible(False)  # shown once grids exist
         self.btn_grid_save.clicked.connect(self._save_current_grid)
         self.btn_grid_revert.clicked.connect(self._revert_current_grid)
         self.btn_grid_export.clicked.connect(self._export_current_grid)
+        self.btn_grid_history.clicked.connect(self._show_history)
         edit_bar.addWidget(self.btn_grid_save)
         edit_bar.addWidget(self.btn_grid_revert)
         edit_bar.addWidget(self.btn_grid_export)
+        edit_bar.addWidget(self.btn_grid_history)
         edit_bar.addStretch(1)
         self.edit_bar_widget = QWidget()
         self.edit_bar_widget.setLayout(edit_bar)
@@ -838,6 +923,7 @@ class QueryControl(RequestControl):
         # The bar always shows once a results grid exists (DBeaver-like);
         # the buttons are only enabled while there is something to save/revert.
         self.edit_bar_widget.setVisible(control is not None)
+        self.btn_grid_history.setVisible(control is not None)
         if control is None:
             return
         n = control._dirty_row_count()
@@ -936,17 +1022,46 @@ class QueryControl(RequestControl):
             return
         self._results_count = 0
         query = self._current_query()
+        # Filters / time ordering are bound to one query text: a new query
+        # (re-run) drops them, pagination navigation keeps them.
+        if query != getattr(self, "_filters_query", None):
+            self._filters = []
+            self._filters_query = query
+        if query != getattr(self, "_time_order_query", None):
+            self._time_order = None
+            self._time_order_query = query
+        # Filter set changed since the last run — the cached COUNT total is
+        # stale even when the chips were modified outside _request_filter.
+        _filters_sig = repr(self._filters)
+        if _filters_sig != getattr(self, "_filters_sig", None):
+            self._total = None
+            self._total_gen = getattr(self, "_total_gen", 0) + 1
+            self._filters_sig = _filters_sig
         is_aggregate = "group by" in query.lower()
         while self.results_tabs.count():
             self.results_tabs.removeTab(0)
         self._sync_edit_bar()
 
+        # Server-side filter chips + ORDER BY time (1.2.0)
+        base_query = query
+        if self._filters:
+            conditions = [query_tools.build_filter_condition(
+                f["column"], f["op"], f["value"], f.get("numeric", False))
+                for f in self._filters]
+            base_query = query_tools.inject_conditions(
+                base_query, conditions) or base_query
+        if self._time_order is not None:
+            base_query = query_tools.inject_order_by_time(
+                base_query, self._time_order) or base_query
+
         # Pagination: plain SELECTs without their own LIMIT get LIMIT/OFFSET.
-        self._paginating = self._page_size > 0 and query_tools.can_paginate(query)
-        effective_query = query
+        self._paginating = self._page_size > 0 \
+            and query_tools.can_paginate(base_query)
+        effective_query = base_query
         if self._paginating:
             effective_query = query_tools.paginate_query(
-                query, self._page_size, (self._page - 1) * self._page_size)
+                base_query, self._page_size,
+                (self._page - 1) * self._page_size)
         else:
             self._page = 1
             self._total = None
@@ -965,6 +1080,10 @@ class QueryControl(RequestControl):
         def done(results):
             self._loading = False
             elapsed_ms = (time.perf_counter() - started) * 1000.0
+            if results is not None and query:
+                from ..app import settings
+                settings.record_query(self.connection_id, self.database,
+                                      query)
             if results:
                 tab_count = 0
                 tab_label = tr("query.group") if is_aggregate else tr("query.results")
@@ -973,20 +1092,23 @@ class QueryControl(RequestControl):
                     control = QueryResultsControl()
                     control.influx_client = self.influx_client
                     control.database = self.database
+                    control.read_only = self.read_only
                     control.on_dirty_changed = self._sync_edit_bar
                     control.on_refresh = self.execute_request
+                    control.on_filter_request = self._request_filter
+                    control.on_server_time_sort = self._server_time_sort
                     self.results_tabs.addTab(control, f"{tab_label} {tab_count}")
                     self._results_count += control.update_results(result)
                     # export-all re-runs the original unpaginated query and
                     # exports this tab's series in full
                     idx = tab_count - 1
                     control.export_all_fetcher = (
-                        lambda q=query, i=idx, cols=list(control._columns):
+                        lambda q=base_query, i=idx, cols=list(control._columns):
                         self._fetch_all_rows(q, i, cols))
             self.results_label.setText(tr(
                 "query.results_label", count=self._results_count, ms=elapsed_ms))
             self._update_pager()
-            self._maybe_load_total(query)
+            self._maybe_load_total(base_query)
 
         def failed(_ex):
             self._loading = False
@@ -994,6 +1116,98 @@ class QueryControl(RequestControl):
             self._update_pager()
 
         self._run(work, done, failed)
+
+    # -- server-side filters (1.2.0) -------------------------------------------
+
+    def _request_filter(self, column: str, numeric: bool = False) -> None:
+        """Open the filter dialog for one column and add a chip."""
+        from .dialogs import FilterDialog
+        if query_tools.inject_conditions(self._current_query(), ["1=1"]) is None:
+            display_error(tr("filter.unsupported"), parent=self)
+            return
+        dialog = FilterDialog(column, parent=self)
+        if dialog.exec() != QDialog.Accepted or not dialog.condition:
+            return
+        column_, op, value = dialog.condition
+        # replacing an identical filter is a no-op refresh
+        self._filters = [f for f in self._filters
+                         if not (f["column"] == column_
+                                 and f["op"] == op and f["value"] == value)]
+        self._filters.append({"column": column_, "op": op, "value": value,
+                              "numeric": numeric})
+        self._page = 1
+        self._total = None  # conditions changed — recount
+        self._rebuild_filter_bar()
+        self.execute_request()
+
+    def _remove_filter(self, column: str, op: str, value: str) -> None:
+        self._filters = [f for f in self._filters
+                         if not (f["column"] == column
+                                 and f["op"] == op and f["value"] == value)]
+        self._page = 1
+        self._total = None
+        self._rebuild_filter_bar()
+        if query_tools.is_select_query(self._current_query()):
+            self.execute_request()
+
+    def _clear_filters(self) -> None:
+        if not self._filters:
+            return
+        self._filters = []
+        self._page = 1
+        self._total = None
+        self._rebuild_filter_bar()
+        if query_tools.is_select_query(self._current_query()):
+            self.execute_request()
+
+    def _rebuild_filter_bar(self) -> None:
+        while self.filter_layout.count() > 1:  # keep the trailing stretch
+            item = self.filter_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        for f in self._filters:
+            chip = QPushButton(
+                f'{f["column"]} {f["op"]} {f["value"]}  {FILTER_CHIP_CLOSE}')
+            chip.setFlat(True)
+            chip.setStyleSheet(
+                "QPushButton { border: 1px solid #999; border-radius: 8px;"
+                " padding: 1px 8px; background: #f4f4f4; }")
+            chip.setToolTip(tr("filter.chip.tip"))
+            chip.clicked.connect(
+                lambda _c=False, col=f["column"], op=f["op"], v=f["value"]:
+                self._remove_filter(col, op, v))
+            self.filter_layout.insertWidget(
+                self.filter_layout.count() - 1, chip)
+        if self._filters:
+            clear_btn = QPushButton(tr("filter.bar.clear_all"))
+            clear_btn.setFlat(True)
+            clear_btn.clicked.connect(self._clear_filters)
+            self.filter_layout.insertWidget(
+                self.filter_layout.count() - 1, clear_btn)
+        self.filter_bar.setVisible(bool(self._filters))
+
+    # -- server-side time ordering (1.2.0) --------------------------------------
+
+    def _server_time_sort(self, descending: bool) -> None:
+        """Toggle ``ORDER BY time`` on the query and re-run."""
+        query = self._current_query()
+        if query_tools.inject_order_by_time(query, descending) is None:
+            display_error(tr("sort.time.unsupported"), parent=self)
+            return
+        self._time_order = None if self._time_order == descending else descending
+        self._time_order_query = query
+        self._page = 1
+        self.execute_request()
+
+    # -- query history (1.2.0) ---------------------------------------------------
+
+    def _show_history(self) -> None:
+        from ..app import settings
+        from .dialogs import QueryHistoryDialog
+        entries = settings.history_for(self.connection_id)
+        dialog = QueryHistoryDialog(entries, self.connection_id, parent=self)
+        if dialog.exec() == QDialog.Accepted and dialog.selected_entry:
+            self.editor.setPlainText(dialog.selected_entry.get("Text", ""))
 
     def _fetch_all_rows(self, query: str, series_index: int,
                         fallback_columns: List[str]):
@@ -1018,11 +1232,14 @@ class QueryControl(RequestControl):
         if not count_query:
             self._update_pager()
             return
+        gen = getattr(self, "_total_gen", 0)
 
         def work():
             return self.influx_client.query(self.database, count_query)
 
         def done(series_list):
+            if gen != getattr(self, "_total_gen", 0):
+                return  # a newer run superseded this count
             total = query_tools.parse_count_value(series_list)
             if total is not None and total >= 0:
                 self._total = total
@@ -2162,3 +2379,53 @@ class StatsControl(RequestControl):
             control.influx_client = self.influx_client
             self.results_tabs.addTab(control, f"{series.Name} {tab_count}")
             control.update_results(series)
+
+
+# ---------------------------------------------------------------------------
+# Generic SHOW-command browsers (1.2.0): SHOW SHARDS / SHOW SUBSCRIPTIONS
+# ---------------------------------------------------------------------------
+
+class ShowCommandControl(RequestControl):
+    """Read-only browser for a no-database SHOW command.
+
+    Each returned series gets its own results tab. ``fetch_fn`` is the
+    client method to call (e.g. ``client.get_shards``).
+    """
+
+    def __init__(self, fetch_fn, empty_key: str, parent: QWidget = None):
+        super().__init__(parent)
+        self._fetch_fn = fetch_fn
+        self._empty_key = empty_key
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        self.results_tabs = QTabWidget()
+        layout.addWidget(self.results_tabs, 1)
+
+    def execute_request(self) -> None:
+        if self.influx_client is None:
+            display_error("No InfluxDB client available.", parent=self)
+            return
+        while self.results_tabs.count():
+            self.results_tabs.removeTab(0)
+        self._run(self._fetch_fn, self._populate)
+
+    def _populate(self, series_list) -> None:
+        series_list = series_list or []
+        if not series_list:
+            label = QLabel(tr(self._empty_key))
+            label.setAlignment(Qt.AlignCenter)
+            self.results_tabs.addTab(label, tr("show.tab"))
+            return
+        tab_count = 0
+        for series in series_list:
+            if not getattr(series, "Values", None):
+                continue
+            tab_count += 1
+            control = QueryResultsControl()
+            control.influx_client = self.influx_client
+            self.results_tabs.addTab(control, f"{series.Name} {tab_count}")
+            control.update_results(series)
+        if self.results_tabs.count() == 0:
+            label = QLabel(tr(self._empty_key))
+            label.setAlignment(Qt.AlignCenter)
+            self.results_tabs.addTab(label, tr("show.tab"))

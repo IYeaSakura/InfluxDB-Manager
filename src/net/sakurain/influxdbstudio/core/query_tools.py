@@ -72,6 +72,91 @@ def can_paginate(query: str) -> bool:
         and not has_explicit_limit(query)
 
 
+# ---------------------------------------------------------------------------
+# Filter / server-side ordering injection (1.2.0)
+# ---------------------------------------------------------------------------
+
+def inject_conditions(query: str, conditions: Sequence[str]) -> Optional[str]:
+    """Return ``query`` with extra ``AND`` conditions merged into its WHERE
+    clause (or a new WHERE after the FROM clause).
+
+    Returns None when the query shape does not allow safe injection
+    (not a plain SELECT, SELECT INTO, or GROUP BY present — grouping would
+    still work but per-group semantics make chip removal surprising, so the
+    UI disables filtering there too).
+    """
+    q = _strip_trailing_semicolon(query)
+    if not conditions or not is_select_query(q) or is_writing_select(q):
+        return None
+    if _WORD_GROUP.search(q):
+        return None
+    clause = " AND ".join(f"({c})" for c in conditions if c and c.strip())
+    if not clause:
+        return q
+    if re.search(r"\bwhere\b", q, re.IGNORECASE):
+        # append AND ... before ORDER BY / LIMIT / OFFSET / SLIMIT if present
+        m = _FROM_CLAUSE_END.search(q)
+        if m:
+            head = q[:m.start()].rstrip()
+            return f"{head} AND {clause} {q[m.start():]}"
+        return f"{q} AND {clause}"
+    m = re.search(r"\bfrom\b", q, re.IGNORECASE)
+    if m is None:
+        return None
+    rest = q[m.end():]
+    end = _FROM_CLAUSE_END.search(rest)
+    if end:
+        head = q[:m.end() + end.start()].rstrip()
+        return f"{head} WHERE {clause} {rest[end.start():]}"
+    return f"{q} WHERE {clause}"
+
+
+def build_filter_condition(column: str, op: str, value: str,
+                           numeric: bool = False) -> str:
+    """Build one InfluxQL condition string for the filter chips.
+
+    ``numeric`` is True only when the column is a numeric-typed field —
+    numeric values then stay unquoted so inequality comparisons work. Tag
+    columns and string-typed fields always quote the value (leading-zero
+    strings like ``042760236`` must not be treated as numbers). ``time``
+    accepts raw expressions such as ``now() - 1h``.
+    """
+    key = column.replace('"', '\\"')
+    v = value.strip()
+    if numeric:
+        try:
+            float(v)
+            return f'"{key}" {op} {v}'
+        except ValueError:
+            pass
+    if timestamp_to_ns(v) is not None:
+        return f'"{key}" {op} \'{v}\''
+    if column.lower() == "time":
+        return f'"{key}" {op} {v}'  # raw expression, e.g. now() - 1h
+    escaped = v.replace("'", "\\'")
+    return f'"{key}" {op} \'{escaped}\''
+
+
+def inject_order_by_time(query: str, descending: bool) -> Optional[str]:
+    """Return ``query`` with ``ORDER BY time [DESC]`` injected.
+
+    InfluxQL 1.x only supports ordering by time; returns None when the
+    query already has an ORDER BY or is not a plain SELECT.
+    """
+    q = _strip_trailing_semicolon(query)
+    if not is_select_query(q) or is_writing_select(q):
+        return None
+    if _WORD_ORDER.search(q):
+        return None
+    direction = "DESC" if descending else "ASC"
+    m = _FROM_CLAUSE_END.search(q)
+    order = f"ORDER BY time {direction}"
+    if m:
+        head = q[:m.start()].rstrip()
+        return f"{head} {order} {q[m.start():]}"
+    return f"{q} {order}"
+
+
 def paginate_query(query: str, limit: int, offset: int) -> str:
     """Return ``query`` with ``LIMIT limit OFFSET offset`` appended."""
     if limit <= 0:

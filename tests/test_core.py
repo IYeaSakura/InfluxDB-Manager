@@ -306,3 +306,132 @@ class TestResourcePaths:
                 "resources", "sakurain.png")
         finally:
             monkeypatch.undo()
+
+
+# ---------------------------------------------------------------------------
+# Server-side filter / ORDER BY injection (1.2.0)
+# ---------------------------------------------------------------------------
+
+class TestFilterAndOrderInjection:
+    def test_inject_new_where(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        out = query_tools.inject_conditions(
+            'SELECT * FROM "m"', ['"a" = \'1\''])
+        assert out == 'SELECT * FROM "m" WHERE ("a" = \'1\')'
+
+    def test_inject_and_existing_where(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        out = query_tools.inject_conditions(
+            'SELECT * FROM "m" WHERE time > now() - 1h', ['"a" = \'1\''])
+        assert out == ('SELECT * FROM "m" WHERE time > now() - 1h '
+                       'AND ("a" = \'1\')')
+
+    def test_inject_keeps_trailing_limit(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        out = query_tools.inject_conditions(
+            'SELECT * FROM "m" WHERE a = 1 LIMIT 100', ['b = 2'])
+        assert out == 'SELECT * FROM "m" WHERE a = 1 AND (b = 2) LIMIT 100'
+
+    def test_inject_rejects_group_by_and_into(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        assert query_tools.inject_conditions(
+            'SELECT mean(v) FROM "m" GROUP BY time(1h)', ['a=1']) is None
+        assert query_tools.inject_conditions(
+            'SELECT v INTO "n" FROM "m"', ['a=1']) is None
+
+    def test_inject_strips_semicolon(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        out = query_tools.inject_conditions(
+            'SELECT * FROM "m";', ['a=1'])
+        assert out == 'SELECT * FROM "m" WHERE (a=1)'
+
+    def test_filter_condition_numeric_field(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        assert query_tools.build_filter_condition(
+            "currentA", ">", "0.5", numeric=True) == '"currentA" > 0.5'
+
+    def test_filter_condition_tag_quotes_leading_zero(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        out = query_tools.build_filter_condition(
+            "nmunicateAddr", "=", "042760236")
+        assert out == '"nmunicateAddr" = \'042760236\''
+
+    def test_filter_condition_time_expression(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        assert query_tools.build_filter_condition(
+            "time", ">", "now() - 1h") == '"time" > now() - 1h'
+
+    def test_filter_condition_time_rfc3339_quoted(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        out = query_tools.build_filter_condition(
+            "time", ">=", "2026-09-27T16:00:00Z")
+        assert out == '"time" >= \'2026-09-27T16:00:00Z\''
+
+    def test_order_by_time_injection(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        out = query_tools.inject_order_by_time(
+            'SELECT * FROM "m" WHERE a = 1', True)
+        assert out == 'SELECT * FROM "m" WHERE a = 1 ORDER BY time DESC'
+
+    def test_order_by_time_rejects_existing(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        assert query_tools.inject_order_by_time(
+            'SELECT * FROM "m" ORDER BY time ASC', False) is None
+
+
+# ---------------------------------------------------------------------------
+# Query history + ReadOnly connection (1.2.0)
+# ---------------------------------------------------------------------------
+
+class TestQueryHistory:
+    def test_record_dedupes_and_caps(self):
+        import net.sakurain.influxdbstudio.core.settings as sm
+        s = sm.AppSettings()
+        s.record_query("c1", "db1", "SELECT 1")
+        s.record_query("c1", "db1", "SELECT 2")
+        s.record_query("c1", "db1", "SELECT 1")  # moves to front
+        assert [h["Text"] for h in s.query_history] == ["SELECT 1", "SELECT 2"]
+        assert s.query_history[0]["ConnectionId"] == "c1"
+        for i in range(250):
+            s.record_query("c1", "db1", f"SELECT {i}")
+        assert len(s.query_history) == s.HISTORY_LIMIT
+
+    def test_history_for_filters_by_connection(self):
+        import net.sakurain.influxdbstudio.core.settings as sm
+        s = sm.AppSettings()
+        s.record_query("c1", "db1", "SELECT 1")
+        s.record_query("c2", "db1", "SELECT 2")
+        assert [h["Text"] for h in s.history_for("c1")] == ["SELECT 1"]
+        assert len(s.history_for("c2")) == 1
+
+    def test_blank_text_not_recorded(self):
+        import net.sakurain.influxdbstudio.core.settings as sm
+        s = sm.AppSettings()
+        s.record_query("c1", "db1", "   ")
+        assert s.query_history == []
+
+    def test_history_roundtrip_in_settings_json(self, tmp_path, monkeypatch):
+        import net.sakurain.influxdbstudio.core.settings as sm
+        monkeypatch.setattr(sm, "_settings_path",
+                            lambda: str(tmp_path / "s.json"))
+        s = sm.AppSettings()
+        s.record_query("c1", "db1", "SELECT 1")
+        s2 = sm.AppSettings()
+        s2.load_all()
+        assert [h["Text"] for h in s2.query_history] == ["SELECT 1"]
+
+
+class TestReadOnlyConnection:
+    def test_readonly_roundtrip(self):
+        from net.sakurain.influxdbstudio.core.models import InfluxDbConnection
+        c = InfluxDbConnection.create(name="n", host="h", port=8086)
+        c.ReadOnly = True
+        d = InfluxDbConnection.from_dict(c.to_dict())
+        assert d.ReadOnly is True
+
+    def test_readonly_defaults_false_and_csharp_compatible(self):
+        from net.sakurain.influxdbstudio.core.models import InfluxDbConnection
+        d = InfluxDbConnection.from_dict({"Id": "x", "Name": "n"})
+        assert d.ReadOnly is False
+        # C#-era exports (no ReadOnly key) still load
+        assert "UseSsl" in d.to_dict() and "ReadOnly" in d.to_dict()

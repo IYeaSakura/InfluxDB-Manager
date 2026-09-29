@@ -169,6 +169,14 @@ class InfluxDbClient:
     def get_stats(self) -> InfluxDbStats:
         raise NotImplementedError
 
+    def get_shards(self) -> List[InfluxDbSeries]:
+        """Raw ``SHOW SHARDS`` series (read-only)."""
+        raise NotImplementedError
+
+    def get_subscriptions(self) -> List[InfluxDbSeries]:
+        """Raw ``SHOW SUBSCRIPTIONS`` series (read-only)."""
+        raise NotImplementedError
+
     # -- Users --------------------------------------------------------------
 
     def get_users(self) -> List[InfluxDbUser]:
@@ -738,6 +746,12 @@ class HttpInfluxDbClient(InfluxDbClient):
         for attr, group in grouped.items():
             setattr(stats, attr, group)
         return stats
+
+    def get_shards(self) -> List[InfluxDbSeries]:
+        return self._get_query("SHOW SHARDS")
+
+    def get_subscriptions(self) -> List[InfluxDbSeries]:
+        return self._get_query("SHOW SUBSCRIPTIONS")
 
     # -- Users ----------------------------------------------------------------------
 

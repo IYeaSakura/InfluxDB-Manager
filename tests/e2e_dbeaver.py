@@ -789,6 +789,177 @@ QTest.keyClick(ed2, Qt.Key_0, Qt.ControlModifier)
 check("Ctrl+0 复位字体", ed2.font().pointSize() == _base_size,
       str(ed2.font().pointSize()))
 
+# ===========================================================================
+# 1.2.0：列过滤 / 服务端时间排序 / Calc 面板 / 只读连接 / 查询历史 / 写入
+# ===========================================================================
+print("== 1.2.0 新功能 ==")
+
+# -- 列过滤 chip 条（服务端重查）------------------------------------------------
+f_client = _FullExportClient()
+qc_f = controls.QueryControl()
+qc_f.influx_client = f_client
+qc_f.database = "zn_data"
+qc_f.show()
+qc_f.editor_text = 'SELECT * FROM "curveData3761"'
+qc_f.execute_request()
+ok = wait_for(lambda: not qc_f._loading and qc_f.results_tabs.count() > 0,
+              timeout_ms=8000)
+check("过滤-初始查询出结果", ok)
+# 模拟表头过滤入口（对话框交互另由单测覆盖字段类型推断）
+qc_f._filters.append({"column": "currentA", "op": ">", "value": "0.5",
+                      "numeric": True})
+qc_f._rebuild_filter_bar()
+check("过滤-chip 条可见", qc_f.filter_bar.isVisible()
+      and qc_f.filter_layout.count() == 3,  # chip + 清除全部 + stretch
+      str(qc_f.filter_layout.count()))
+qc_f.execute_request()
+ok = wait_for(lambda: not qc_f._loading, timeout_ms=8000)
+check("过滤-服务端重查注入 WHERE",
+      ok and any('WHERE ("currentA" > 0.5)' in q for q in f_client.queries),
+      str(f_client.queries[-2:]))
+check("过滤-COUNT 同样带条件",
+      wait_for(lambda: any("COUNT(*)" in q and '"currentA" > 0.5' in q
+                           for q in f_client.queries), timeout_ms=8000),
+      str(f_client.queries[-3:]))
+qc_f._clear_filters()
+wait_for(lambda: not qc_f._loading, timeout_ms=8000)  # 清除会触发异步重查
+check("过滤-清除全部后 chip 条隐藏", not qc_f.filter_bar.isVisible()
+      and qc_f._filters == [])
+# 前导零字符串值必须加引号（表地址类 tag）
+from net.sakurain.influxdbstudio.core import query_tools as _qt
+check("过滤-前导零字符串加引号",
+      _qt.build_filter_condition("nmunicateAddr", "=", "042760236")
+      == '"nmunicateAddr" = \'042760236\'')
+# 换查询文本后过滤自动失效
+qc_f._filters.append({"column": "currentA", "op": ">", "value": "0.5",
+                      "numeric": True})
+qc_f.editor_text = 'SELECT * FROM "other"'
+qc_f.execute_request()
+ok = wait_for(lambda: not qc_f._loading, timeout_ms=8000)
+check("过滤-新查询自动清除旧条件", ok and qc_f._filters == [])
+
+# -- 服务端时间排序（ORDER BY time 注入）-----------------------------------------
+qc_f.editor_text = 'SELECT * FROM "curveData3761"'
+f_client.queries.clear()
+qc_f._server_time_sort(True)
+ok = wait_for(lambda: not qc_f._loading, timeout_ms=8000)
+check("时间排序-注入 ORDER BY time DESC",
+      ok and any("ORDER BY time DESC" in q for q in f_client.queries),
+      str(f_client.queries[-2:]))
+f_client.queries.clear()
+qc_f._server_time_sort(True)  # 再次点击 = 取消
+ok = wait_for(lambda: not qc_f._loading, timeout_ms=8000)
+check("时间排序-再次点击取消",
+      ok and qc_f._time_order is None
+      and not any("ORDER BY" in q for q in f_client.queries),
+      str(f_client.queries[-2:]))
+
+# -- Calc 统计面板 --------------------------------------------------------------
+rc2.table.clearSelection()
+for r in range(rc2.table.rowCount()):
+    rc2.table.item(r, 2).setSelected(True)  # "v" 列：3, 1, 2
+check("Calc 面板显示统计", "2" in rc2.calc_label.text()
+      and rc2.calc_label.isVisible(), rc2.calc_label.text())
+rc2.table.clearSelection()
+check("Calc 面板无选中时隐藏", not rc2.calc_label.isVisible())
+
+# -- 只读连接 -------------------------------------------------------------------
+rc_ro = controls.QueryResultsControl()
+rc_ro.influx_client = fake
+rc_ro.database = "zn_data"
+rc_ro.read_only = True
+rc_ro.show()
+rc_ro.update_results(series2)
+rc_ro._edit_meta_loaded = True
+rc_ro._field_types = {"v": "integer"}
+check("只读-单元格不可编辑", not rc_ro.is_editable_cell(0, 2))
+modals_before = len(MODALS)
+rc_ro.table.selectRow(0)
+rc_ro.stage_delete_selected()
+check("只读-删除被阻止并提示", rc_ro._deleted_rows == set()
+      and any(m[0] == "critical" for m in MODALS[modals_before:]),
+      str(MODALS[modals_before:]))
+_menu_states = {}
+
+
+def _capture_menu(control):
+    def chooser(menu):
+        _menu_states.update(
+            (a.text(), a.isEnabled()) for a in menu.actions())
+        return None
+    control._show_context_menu(_QPoint(10, 10), chooser=chooser)
+
+
+_capture_menu(rc_ro)
+check("只读-右键删除项禁用",
+      _menu_states.get(_tr("grid.delete_rows", n=1)) is False
+      and _menu_states.get(_tr("grid.revert_changes")) is False,
+      str(_menu_states))
+
+# -- 查询历史 -------------------------------------------------------------------
+settings.record_query("cid1", "zn_data", "SELECT 9")
+check("历史-record_query 置顶", settings.history_for("cid1")[0]["Text"] == "SELECT 9",
+      str(settings.history_for("cid1")[:1]))
+settings.record_query("cid1", "zn_data", "SELECT 9")  # 重复记录应去重置顶
+check("历史-重复查询去重",
+      sum(1 for h in settings.history_for("cid1") if h["Text"] == "SELECT 9") == 1,
+      str(settings.history_for("cid1")))
+# QueryControl 执行成功后自动记录（done() 中 record_query）
+qc_h = controls.QueryControl()
+qc_h.influx_client = f_client
+qc_h.database = "zn_data"
+qc_h.connection_id = "cid_hist"
+qc_h.show()
+qc_h.editor_text = 'SELECT * FROM "curveData3761"'
+qc_h.execute_request()
+ok = wait_for(lambda: not qc_h._loading, timeout_ms=8000)
+_hist = settings.history_for("cid_hist")
+check("历史-执行后自动记录",
+      ok and len(_hist) >= 1 and _hist[0]["Text"].startswith("SELECT")
+      and _hist[0]["ConnectionId"] == "cid_hist" and _hist[0]["Database"] == "zn_data",
+      str(_hist[:1]))
+
+# -- 写入数据点对话框（解析与校验，不触网）--------------------------------------
+wdlg = dlg_mod.WritePointDialog("zn_data", "m")
+wdlg.tags_edit.setText("site=a")
+wdlg.fields_edit.setText("k=1, s='x', b=true")
+wdlg._on_accept()
+check("写入-字段与标签解析",
+      wdlg.point is not None
+      and wdlg.point.Fields == {"k": 1, "s": "x", "b": True}
+      and wdlg.point.Tags == {"site": "a"}
+      and wdlg.point.Measurement == "m",
+      repr(wdlg.point.Fields if wdlg.point else None))
+modals_before = len(MODALS)
+wdlg_bad = dlg_mod.WritePointDialog("zn_data", "m")
+wdlg_bad.fields_edit.setText("")
+wdlg_bad._on_accept()
+check("写入-空字段拒绝并提示",
+      wdlg_bad.point is None
+      and any(m[0] == "critical" for m in MODALS[modals_before:]),
+      str(MODALS[modals_before:]))
+
+# -- SHOW SHARDS / SUBSCRIPTIONS 浏览器 -----------------------------------------
+sc = controls.ShowCommandControl(lambda: [series2], "shards.empty")
+sc.influx_client = fake
+sc.show()
+sc.execute_request()
+ok = wait_for(lambda: sc.results_tabs.count() > 0, timeout_ms=8000)
+_sc_inner = sc.results_tabs.widget(0) if sc.results_tabs.count() else None
+check("分片浏览器-单 series 渲染 3 行",
+      ok and sc.results_tabs.count() == 1 and _sc_inner is not None
+      and _sc_inner.table.rowCount() == 3,
+      f"tabs={sc.results_tabs.count()} rows="
+      f"{_sc_inner.table.rowCount() if _sc_inner else '-'}")
+sc_empty = controls.ShowCommandControl(lambda: [], "shards.empty")
+sc_empty.influx_client = fake
+sc_empty.show()
+sc_empty.execute_request()
+ok = wait_for(lambda: sc_empty.results_tabs.count() > 0, timeout_ms=8000)
+check("分片浏览器-空结果显示占位", ok and sc_empty.results_tabs.count() == 1,
+      str(sc_empty.results_tabs.count()))
+
+
 # -- SQL 编辑器：Ctrl+/ 注释整行 + 注释行变灰 ----------------------------------
 from net.sakurain.influxdbstudio.ui.common import (
     _toggle_line_comment, create_sql_editor)

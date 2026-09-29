@@ -26,6 +26,7 @@ Core features inherited from the original project's design and reimplemented in 
 ### Connection Management
 
 - Create, edit, delete, and clone InfluxDB connections (host, port, credentials, database, SSL)
+- **Read-only connections**: mark a connection read-only to block all edits, row deletions, and point writes (menu items disable automatically)
 - Test / Ping a connection before saving it
 - Optional "allow untrusted SSL certificates" setting per application
 - Connection tree browser: Connection -> Databases -> Measurements, lazily expanded on demand
@@ -38,6 +39,7 @@ Core features inherited from the original project's design and reimplemented in 
 - GROUP BY queries automatically split results into multiple tabs
 - **Ctrl+/** toggles line comments on the current or selected lines; commented lines render gray; scripts starting with `--` comment headers still paginate and count correctly
 - Query script tabs: rename via right-click tab menu; all open scripts (name, connection, database, content, active tab) are **persisted and automatically restored on the next launch**
+- **Query history**: every successful execution is recorded (deduplicated, most-recent first, up to 200 entries, persisted in settings.json); the grid toolbar's history button opens a browsable list — double-click an entry to load it back into the editor, with per-entry and bulk delete
 
 ### Result Grid (DBeaver-Style)
 
@@ -46,7 +48,9 @@ Core features inherited from the original project's design and reimplemented in 
 - **Row deletion**: select rows and press **Delete** (or use the context menu) to stage them (red highlight); on save, generates precise `DELETE FROM "m" WHERE time = '...ns RFC3339...' AND "tag" = '...'` statements; reverts cleanly with the rollback action
 - **Second-confirmation save**: a confirmation dialog lists every overwrite and every staged row deletion before anything touches the database; successful save reports overwritten/deleted row counts
 - **Visible save/revert bar**: always shown above the results, enabled only while changes exist; also available via context menu and Ctrl+S
-- **Header context menu**: copy column name / copy all column names, sort the current page ascending or descending (numeric-aware, disabled while dirty), column width fit-values, hide column / show all columns, refresh, export
+- **Header context menu**: copy column name / copy all column names, sort the current page ascending or descending (numeric-aware, disabled while dirty), **filter this column** (see below), **server-side time sort** on the `time` column (injects `ORDER BY time DESC` and re-queries; click again to cancel), column width fit-values, hide column / show all columns, refresh, export
+- **Column filtering (server-side)**: the filter dialog supports `=` / `!=` / `>` / `>=` / `<` / `<=` / `=~` / `!~`; conditions are injected into the query's WHERE clause and re-executed — active filters show as removable chips above the grid, with a clear-all button; pagination and the `COUNT(*)` total always respect the filters (numeric fields compare unquoted, tags/strings/leading-zero values are quoted, `time` accepts raw expressions like `now() - 1h`); switching query text clears the filters automatically
+- **Calc panel**: selecting numeric cells shows count / average / sum / min / max below the grid
 - **Body context menu**: copy/paste, save/revert changes, delete selected rows, and (only when rows are selected) export selected rows
 - Selection highlight in blue; copy/paste integrates with the system clipboard (TSV)
 - **Export results**: six formats — CSV / XLSX / XML / Markdown / JSON / HTML; CSV allows a custom delimiter (default `,`) and is written as UTF-8 with BOM for Excel compatibility
@@ -62,6 +66,8 @@ Core features inherited from the original project's design and reimplemented in 
 - Continuous queries: list, create (with RESAMPLE EVERY/FOR advanced syntax), drop, backfill
 - Backfill builder: visually compose a backfill query and run it
 - Running queries: `SHOW QUERIES` browser with `KILL QUERY` support (with the C#-compatible "query interrupted" error swallowing)
+- **Write data point**: right-click a database or measurement and compose a single point (measurement, tags, fields, time, retention policy) with line-protocol preview and a second confirmation before writing
+- **SHOW SHARDS / SHOW SUBSCRIPTIONS**: right-click a connection to browse shards and subscriptions (read-only)
 
 ### Measurement Exploration
 
@@ -228,6 +234,16 @@ The application stores connections in the per-user settings file (no `.env` need
 - Use `|<`, `<`, `>`, `>|` to move between pages; the label shows `rows start-end / total`.
 - Sort the current page by any column via the header right-click menu.
 
+### Filter and Re-Sort Server-Side
+
+- Right-click a column header and choose **Filter This Column...** to add a WHERE condition; the query re-runs on the server and the condition appears as a chip above the grid. Click a chip to remove it, or **Clear All** to drop every filter. The row total is recounted with the filters applied.
+- Right-click the `time` column header and choose **Sort by Time Descending (Re-query)** to inject `ORDER BY time DESC`; choose it again to cancel.
+- Select numeric cells to see count / average / sum / min / max in the Calc panel below the grid.
+
+### Reuse Queries
+
+- The **Query History** button in the grid toolbar lists every query executed on the current connection (newest first, persisted across launches). Double-click an entry to load it back into the editor, or remove entries you no longer need.
+
 ### Persist Query Scripts
 
 - Open as many query tabs as needed; each gets a unique script name.
@@ -375,9 +391,9 @@ Every control inherits `RequestControl`, which wraps `run_async` and marshals re
 
 | Suite | Checks | Server Required | What It Verifies |
 |-------|--------|-----------------|------------------|
-| `test_core.py` + `test_query_tools.py` | 57 | No | Statements, line protocol, settings round-trip, pagination, DELETE builder, comment stripping |
+| `test_core.py` + `test_query_tools.py` | 90 | No | Statements, line protocol, settings round-trip, pagination, DELETE builder, comment stripping, filter/order injection, query history, read-only connections |
 | `e2e_gui.py` | 40 | No (FakeClient) | Full GUI regression: tree, dialogs, controls, exports |
-| `e2e_dbeaver.py --part2` | 72 | No (FakeClient) | Editing, dirty marks, row deletion, confirm dialog, pager input, header menu, sorting, comments, edit bar |
+| `e2e_dbeaver.py --part2` | 124 | No (FakeClient) | Editing, dirty marks, row deletion, confirm dialog, pager input, header menu, sorting, comments, edit bar, column filters, time ordering, Calc panel, history, write dialog, shards browser |
 | `e2e_dbeaver.py --part1` | 7 | Yes (read-only) | Real-server pagination, LIMIT/OFFSET injection, COUNT totals |
 | `e2e_readonly.py` | - | Yes (read-only) | Read-only guarantees against a production-like server |
 

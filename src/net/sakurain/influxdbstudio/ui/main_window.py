@@ -465,6 +465,10 @@ class MainWindow(QMainWindow):
                                   lambda: self.show_statistics(item))
             self._add_menu_action(menu, "ctx.connection.show_diagnostics",
                                   lambda: self.show_diagnostics(item))
+            self._add_menu_action(menu, "ctx.connection.show_shards",
+                                  lambda: self.show_shards(item))
+            self._add_menu_action(menu, "ctx.connection.show_subscriptions",
+                                  lambda: self.show_subscriptions(item))
             menu.addSeparator()
             self._add_menu_action(menu, "ctx.connection.disconnect",
                                   lambda: self.disconnect(item))
@@ -476,6 +480,8 @@ class MainWindow(QMainWindow):
                                   lambda: self.show_continuous_queries(item))
             self._add_menu_action(menu, "ctx.database.run_backfill",
                                   lambda: self.run_backfill(item))
+            self._add_menu_action(menu, "ctx.database.write_point",
+                                  lambda: self.write_point(item))
             menu.addSeparator()
             if item.text(0) != "_internal":
                 self._add_menu_action(menu, "ctx.database.drop_database",
@@ -491,6 +497,8 @@ class MainWindow(QMainWindow):
                                   lambda: self.show_tag_values(item))
             self._add_menu_action(menu, "ctx.measurement.field_keys",
                                   lambda: self.show_field_keys(item))
+            self._add_menu_action(menu, "ctx.measurement.write_point",
+                                  lambda: self.write_point(item))
             menu.addSeparator()
             self._add_menu_action(menu, "ctx.measurement.drop_measurement",
                                   lambda: self.drop_measurement(item))
@@ -954,6 +962,76 @@ class MainWindow(QMainWindow):
         except Exception as ex:
             display_exception(ex, parent=self)
 
+    def show_shards(self, node: QTreeWidgetItem) -> None:
+        try:
+            connection = self._connection_of(node)
+            client = self._client_for(connection)
+            control = controls.ShowCommandControl(
+                client.get_shards, "shards.empty")
+            control.influx_client = client
+            self.add_tab_with_control(connection.Name + ".shards", control,
+                                      "ShowShards")
+            control.execute_request()
+        except Exception as ex:
+            display_exception(ex, parent=self)
+
+    def show_subscriptions(self, node: QTreeWidgetItem) -> None:
+        try:
+            connection = self._connection_of(node)
+            client = self._client_for(connection)
+            control = controls.ShowCommandControl(
+                client.get_subscriptions, "subscriptions.empty")
+            control.influx_client = client
+            self.add_tab_with_control(connection.Name + ".subscriptions",
+                                      control, "ShowSubscriptions")
+            control.execute_request()
+        except Exception as ex:
+            display_exception(ex, parent=self)
+
+    def write_point(self, node: QTreeWidgetItem) -> None:
+        """Write a single point (1.2.0) — the C# version's planned feature."""
+        from .dialogs import WritePointDialog
+        try:
+            connection = self._connection_of(node)
+            if connection.ReadOnly:
+                display_error(tr("read_only.blocked"), parent=self)
+                return
+            client = self._client_for(connection)
+            database = ""
+            measurement = ""
+            parent = node.parent()
+            if self._node_type(node) == NodeType.Database:
+                database = node.text(0)
+            elif self._node_type(node) == NodeType.Measurement:
+                measurement = node.text(0)
+                database = parent.text(0) if parent is not None else ""
+            if not database:
+                display_error(tr("write.no_database"), parent=self)
+                return
+            dialog = WritePointDialog(database, measurement, parent=self)
+            if dialog.exec() != QDialog.Accepted or dialog.point is None:
+                return
+            point = dialog.point
+            preview = tr("write.preview",
+                         measurement=point.Measurement,
+                         tags=", ".join(f"{k}={v}" for k, v in
+                                        sorted(point.Tags.items())) or "-",
+                         fields=", ".join(f"{k}={v}" for k, v in
+                                          sorted(point.Fields.items())),
+                         time=point.Time or tr("write.time.now"))
+            if not confirm(tr("write.confirm.title"), preview, parent=self):
+                return
+            rp = dialog.retention_policy()
+            response = client.write(database, point=point,
+                                    retention_policy=rp)
+            if response.Success:
+                QMessageBox.information(
+                    self, tr("write.success.title"), tr("write.success"))
+            else:
+                display_error(response.Body or tr("write.failed"), parent=self)
+        except Exception as ex:
+            display_exception(ex, parent=self)
+
     # ==========================================================================
     # Database commands
     # ==========================================================================
@@ -1098,6 +1176,8 @@ class MainWindow(QMainWindow):
             control.influx_client = client
             control.database = database
             control.script_connection_id = connection.Id
+            control.connection_id = connection.Id
+            control.read_only = connection.ReadOnly
             base = f"{connection.Name}.{database}"
             existing = {w_c.script_name for _i, _w, w_c in self._query_tabs()}
             name = base

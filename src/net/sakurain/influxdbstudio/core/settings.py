@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from typing import List, Optional
+
+
+def _now_iso() -> str:
+    return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 try:
     from platformdirs import user_config_dir
@@ -59,6 +64,9 @@ class AppSettings:
         self.active_query_tab = -1
         # Last directory used for result export (remembered across launches)
         self.last_export_dir = ""
+        # Executed queries, most recent first
+        # (each: {"ConnectionId", "Database", "Text", "Time"})
+        self.query_history: List[dict] = []
 
     # -- persistence ---------------------------------------------------------
 
@@ -83,6 +91,9 @@ class AppSettings:
             self.query_scripts = [s for s in scripts if isinstance(s, dict)]
         self.active_query_tab = int(data.get("ActiveQueryTab", -1) or -1)
         self.last_export_dir = data.get("LastExportDir", "") or ""
+        history = data.get("QueryHistory")
+        if isinstance(history, list):
+            self.query_history = [h for h in history if isinstance(h, dict)]
 
     def save_all(self) -> None:
         data = {
@@ -95,6 +106,7 @@ class AppSettings:
             "QueryScripts": self.query_scripts,
             "ActiveQueryTab": self.active_query_tab,
             "LastExportDir": self.last_export_dir,
+            "QueryHistory": self.query_history,
         }
         try:
             with open(_settings_path(), "w", encoding="utf-8") as f:
@@ -172,6 +184,38 @@ class AppSettings:
         if directory and directory != self.last_export_dir:
             self.last_export_dir = directory
             self.save_all()
+
+    # -- query history (1.2.0) ------------------------------------------------
+
+    HISTORY_LIMIT = 200
+
+    def record_query(self, connection_id: str, database: str,
+                     text: str) -> None:
+        """Push an executed query onto the history (deduped, most recent
+        first, capped at ``HISTORY_LIMIT``)."""
+        text = (text or "").strip()
+        if not text:
+            return
+        entry = {
+            "ConnectionId": connection_id or "",
+            "Database": database or "",
+            "Text": text,
+            "Time": _now_iso(),
+        }
+        self.query_history = [
+            h for h in self.query_history
+            if not (h.get("ConnectionId") == entry["ConnectionId"]
+                    and h.get("Database") == entry["Database"]
+                    and h.get("Text") == text)
+        ]
+        self.query_history.insert(0, entry)
+        del self.query_history[self.HISTORY_LIMIT:]
+        self.save_all()
+
+    def history_for(self, connection_id: str) -> List[dict]:
+        """History entries for one connection, most recent first."""
+        return [h for h in self.query_history
+                if h.get("ConnectionId") == (connection_id or "")]
 
     def format_time_value(self, dt) -> str:
         """Format a datetime according to the current time/date settings."""
