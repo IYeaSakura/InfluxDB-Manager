@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.1 — 2026-09-29
+
+翻译完善版本。
+
+### 修复
+
+- 界面汉化补全：修复 6 处绕过 i18n 的硬编码英文错误提示（"No InfluxDB client available."）与新建连接默认名（"New Connection"），新增 `query.no_client` / `conn.dialog.new_name` 词条
+- 中文语言包英译词条修正：`loading` →「加载中…」、Ping 成功提示、`EXPLAIN`/`EXPLAIN ANALYZE` 按钮 →「执行计划」/「执行计划（分析）」；写入对话框与 CSV 导入向导的 measurement / tags / fields / time / 角色标签改为中文（保留英文术语括注）；中英语言包保持 432 key 完全对齐
+
 ## 1.4.0 — 2026-09-29
 
 向后兼容的功能版本（SQL 编辑器体验增强）。

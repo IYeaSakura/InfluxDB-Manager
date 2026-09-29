@@ -191,7 +191,7 @@ class ConnectionDialog(QDialog):
 
     def reset_values(self) -> None:
         self.connection_id = None
-        self.set_connection_name("New Connection")
+        self.set_connection_name(tr("conn.dialog.new_name"))
         self.set_host("localhost")
         self.set_port(8086)
         self.set_database("")

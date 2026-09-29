@@ -1128,7 +1128,7 @@ class QueryControl(RequestControl):
 
     def execute_request(self) -> None:
         if self.influx_client is None:
-            display_error("No InfluxDB client available.", parent=self)
+            display_error(tr("query.no_client"), parent=self)
             return
         if self._loading:
             return
@@ -1492,7 +1492,7 @@ class MeasurementControl(RequestControl):
 
     def execute_request(self) -> None:
         if self.influx_client is None:
-            display_error("No InfluxDB client available.", parent=self)
+            display_error(tr("query.no_client"), parent=self)
             return
         self.table.setRowCount(0)
         self.table.setColumnCount(0)
@@ -2358,7 +2358,7 @@ class RunningQueriesControl(RequestControl):
 
     def execute_request(self) -> None:
         if self.influx_client is None:
-            display_error("No InfluxDB client available.", parent=self)
+            display_error(tr("query.no_client"), parent=self)
             return
 
         def done(queries):
@@ -2462,7 +2462,7 @@ class DiagnosticsControl(RequestControl):
 
     def execute_request(self) -> None:
         if self.influx_client is None:
-            display_error("No InfluxDB client available.", parent=self)
+            display_error(tr("query.no_client"), parent=self)
             return
         self._run(self.influx_client.get_diagnostics, self._populate)
 
@@ -2514,7 +2514,7 @@ class StatsControl(RequestControl):
 
     def execute_request(self) -> None:
         if self.influx_client is None:
-            display_error("No InfluxDB client available.", parent=self)
+            display_error(tr("query.no_client"), parent=self)
             return
         self.stats_combo.clear()
         while self.results_tabs.count():
@@ -2577,7 +2577,7 @@ class ShowCommandControl(RequestControl):
 
     def execute_request(self) -> None:
         if self.influx_client is None:
-            display_error("No InfluxDB client available.", parent=self)
+            display_error(tr("query.no_client"), parent=self)
             return
         while self.results_tabs.count():
             self.results_tabs.removeTab(0)
