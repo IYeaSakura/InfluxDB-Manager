@@ -183,12 +183,17 @@ cd InfluxDBStudio
 
 # Create and activate a virtual environment in the project root
 python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # Linux / macOS
+.venv\Scripts\activate            # Windows cmd
+.venv\Scripts\Activate.ps1        # Windows PowerShell
+# source .venv/bin/activate       # Linux / macOS
 
 # Install in editable mode
-python -m pip install -e .
+./.venv/Scripts/python.exe -m pip install -e .
 ```
+
+> The venv interpreter is `.venv/Scripts/python.exe`. In bash (Git Bash / MSYS2)
+> invoke it as `./.venv/Scripts/python.exe`; in PowerShell or cmd the equivalent
+> is `.\.venv\Scripts\python.exe`. All commands below use the bash form.
 
 ### Run
 
@@ -273,15 +278,15 @@ The application stores connections in the per-user settings file (no `.env` need
 
 ```bash
 # Unit tests (fast, no server needed)
-.venv\Scripts\python -m pytest tests/ -q --ignore=tests/e2e_gui.py --ignore=tests/e2e_readonly.py
+./.venv/Scripts/python.exe -m pytest tests/ -q --ignore=tests/e2e_gui.py --ignore=tests/e2e_readonly.py
 
 # Full GUI e2e suite (offscreen platform, FakeClient — no real server touched)
 set QT_QPA_PLATFORM=offscreen          # Windows
-.venv\Scripts\python tests/e2e_gui.py
+./.venv/Scripts/python.exe tests/e2e_gui.py
 
 # DBeaver-style feature suite (part 2 uses FakeClient; part 1 is read-only against a real server)
-.venv\Scripts\python tests/e2e_dbeaver.py --part2
-.venv\Scripts\python tests/e2e_dbeaver.py --part1
+./.venv/Scripts/python.exe tests/e2e_dbeaver.py --part2
+./.venv/Scripts/python.exe tests/e2e_dbeaver.py --part1
 ```
 
 ### Available Commands
@@ -316,13 +321,14 @@ set QT_QPA_PLATFORM=offscreen          # Windows
 The build uses a checked-in PyInstaller spec (`InfluxDBManager.spec`) that trims unused Qt modules (Qml/Quick/Pdf/OpenGL/3D/…) and plugins, cutting the bundle from ~120 MB of binaries to a ~30 MB single-file exe.
 
 ```bash
-.venv\Scripts\python -m pip install pyinstaller
-.venv\Scripts\python -m PyInstaller InfluxDBManager.spec --distpath dist_slim --workpath build_slim --clean -y
+./.venv/Scripts/python.exe -m pip install pyinstaller
+./.venv/Scripts/python.exe -m PyInstaller InfluxDBManager.spec --noconfirm
+cp dist/InfluxDBManager.exe dist_slim/InfluxDBManager.exe
 ```
 
 Note: the managed Python runtime used for development keeps its OpenSSL DLLs outside the standard library folder; the spec already bundles `libssl-3-x64.dll` / `libcrypto-3-x64.dll` explicitly. If you build with a standard python.org interpreter, you can drop those two `--add-binary` entries from the spec.
 
-Output: `dist_slim/InfluxDBManager.exe` (single file, windowed, sakurain icon, embedded version info `1.1.0.0`). The window and the Windows taskbar show the sakurain icon (an explicit `AppUserModelID` is set at startup so taskbar grouping shows the correct icon).
+Output: `dist_slim/InfluxDBManager.exe` (single file, windowed, sakurain icon, version info embedded from `installer/version.txt`). The window and the Windows taskbar show the sakurain icon (an explicit `AppUserModelID` is set at startup so taskbar grouping shows the correct icon).
 
 ### Build a Windows Installer
 
@@ -332,7 +338,7 @@ The installer is built with [Inno Setup](https://jrsoftware.org/isdl.php) 7.x fr
 "path\to\ISCC.exe" installer\setup.iss
 ```
 
-Output: `dist/InfluxDBManager-Setup-1.1.0.exe` (~31 MB).
+Output: `dist/InfluxDBManager-Setup-<version>.exe` (~31 MB).
 
 ### Build Stages
 
@@ -422,7 +428,7 @@ Every control inherits `RequestControl`, which wraps `run_async` and marshals re
 **Solution**:
 
 ```bash
-.venv\Scripts\python -m pip install -e .
+./.venv/Scripts/python.exe -m pip install -e .
 ```
 
 Make sure you launched `python main.py` with the interpreter from the project-root `.venv`.

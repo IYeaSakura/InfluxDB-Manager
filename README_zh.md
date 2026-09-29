@@ -183,12 +183,17 @@ cd InfluxDBStudio
 
 # 在项目根目录创建并激活虚拟环境
 python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # Linux / macOS
+.venv\Scripts\activate            # Windows cmd
+.venv\Scripts\Activate.ps1        # Windows PowerShell
+# source .venv/bin/activate       # Linux / macOS
 
 # 以可编辑模式安装
-python -m pip install -e .
+./.venv/Scripts/python.exe -m pip install -e .
 ```
+
+> 虚拟环境解释器为 `.venv/Scripts/python.exe`。在 bash（Git Bash / MSYS2）中写作
+> `./.venv/Scripts/python.exe`；在 PowerShell 或 cmd 中等价写法为
+> `.\.venv\Scripts\python.exe`。下文所有命令均使用 bash 写法。
 
 ### 运行
 
@@ -273,15 +278,15 @@ python -m net.sakurain.influxdbstudio
 
 ```bash
 # 单元测试（快速，无需服务端）
-.venv\Scripts\python -m pytest tests/ -q --ignore=tests/e2e_gui.py --ignore=tests/e2e_readonly.py
+./.venv/Scripts/python.exe -m pytest tests/ -q --ignore=tests/e2e_gui.py --ignore=tests/e2e_readonly.py
 
 # 完整 GUI 回归（离屏平台，FakeClient —— 不触碰真实服务端）
 set QT_QPA_PLATFORM=offscreen          # Windows
-.venv\Scripts\python tests/e2e_gui.py
+./.venv/Scripts/python.exe tests/e2e_gui.py
 
 # 类 DBeaver 功能套件（part2 使用 FakeClient；part1 对真实服务端只读）
-.venv\Scripts\python tests/e2e_dbeaver.py --part2
-.venv\Scripts\python tests/e2e_dbeaver.py --part1
+./.venv/Scripts/python.exe tests/e2e_dbeaver.py --part2
+./.venv/Scripts/python.exe tests/e2e_dbeaver.py --part1
 ```
 
 ### 常用命令
@@ -316,13 +321,14 @@ set QT_QPA_PLATFORM=offscreen          # Windows
 构建使用仓库内置的 PyInstaller spec（`InfluxDBManager.spec`），裁剪掉用不到的 Qt 模块（Qml/Quick/Pdf/OpenGL/3D 等）与插件，打包体积从约 120 MB 二进制精简到约 30 MB 的单文件 exe。
 
 ```bash
-.venv\Scripts\python -m pip install pyinstaller
-.venv\Scripts\python -m PyInstaller InfluxDBManager.spec --distpath dist_slim --workpath build_slim --clean -y
+./.venv/Scripts/python.exe -m pip install pyinstaller
+./.venv/Scripts/python.exe -m PyInstaller InfluxDBManager.spec --noconfirm
+cp dist/InfluxDBManager.exe dist_slim/InfluxDBManager.exe
 ```
 
 注意：开发所用的托管 Python 运行时将 OpenSSL DLL 放在标准库目录之外，spec 已通过 `--add-binary` 显式打包 `libssl-3-x64.dll` / `libcrypto-3-x64.dll`。若使用 python.org 官方解释器构建，可从 spec 中删去这两行。
 
-产物：`dist_slim/InfluxDBManager.exe`（单文件、无控制台窗口、sakurain 图标、内嵌版本信息 `1.1.0.0`）。窗口与 Windows 任务栏均显示 sakurain 图标（启动时显式设置 `AppUserModelID`，任务栏分组图标正确）。
+产物：`dist_slim/InfluxDBManager.exe`（单文件、无控制台窗口、sakurain 图标，版本信息取自 `installer/version.txt` 内嵌）。窗口与 Windows 任务栏均显示 sakurain 图标（启动时显式设置 `AppUserModelID`，任务栏分组图标正确）。
 
 ### 构建 Windows 安装包
 
@@ -332,7 +338,7 @@ set QT_QPA_PLATFORM=offscreen          # Windows
 "path\to\ISCC.exe" installer\setup.iss
 ```
 
-产物：`dist/InfluxDBManager-Setup-1.1.0.exe`（约 31 MB）。
+产物：`dist/InfluxDBManager-Setup-<version>.exe`（约 31 MB）。
 
 ### 构建阶段
 
@@ -422,7 +428,7 @@ GUI 线程  <--队列信号--  done(result) / failed(exception)
 **解决**：
 
 ```bash
-.venv\Scripts\python -m pip install -e .
+./.venv/Scripts/python.exe -m pip install -e .
 ```
 
 请确认使用项目根目录 `.venv` 中的解释器运行 `python main.py`。
