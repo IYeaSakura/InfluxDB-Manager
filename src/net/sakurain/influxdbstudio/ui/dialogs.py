@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core import exporters
+from ..core import csv_import
 from ..core.client import InfluxDbClient, create_client
 from ..core.helper import is_time_interval_valid
 from ..core.models import (
@@ -111,6 +112,13 @@ class ConnectionDialog(QDialog):
         self.read_only_check = QCheckBox(tr("conn.dialog.read_only"))
         form.addRow("", self.read_only_check)
 
+        # 1.3.0: connection category (DBeaver-style prod/test/dev marking)
+        self.category_combo = QComboBox()
+        for key in ("", "development", "test", "production"):
+            self.category_combo.addItem(tr(f"conn.category.{key or 'none'}"),
+                                        key)
+        _form_row(form, "conn.dialog.category", self.category_combo)
+
         buttons = QDialogButtonBox(Qt.Horizontal)
         self.test_button = buttons.addButton(tr("test"), QDialogButtonBox.ActionRole)
         self.ping_button = buttons.addButton(tr("ping"), QDialogButtonBox.ActionRole)
@@ -172,6 +180,13 @@ class ConnectionDialog(QDialog):
     def set_read_only(self, value: bool) -> None:
         self.read_only_check.setChecked(bool(value))
 
+    def category(self) -> str:
+        return self.category_combo.currentData() or ""
+
+    def set_category(self, value: str) -> None:
+        index = self.category_combo.findData(value or "")
+        self.category_combo.setCurrentIndex(index if index >= 0 else 0)
+
     # -- commands ---------------------------------------------------------------
 
     def reset_values(self) -> None:
@@ -184,6 +199,7 @@ class ConnectionDialog(QDialog):
         self.set_password("")
         self.set_use_ssl(False)
         self.set_read_only(False)
+        self.set_category("")
 
     def bind_to_connection(self, connection: InfluxDbConnection) -> None:
         self.connection_id = connection.Id
@@ -195,6 +211,7 @@ class ConnectionDialog(QDialog):
         self.set_password(connection.Password)
         self.set_use_ssl(connection.UseSsl)
         self.set_read_only(connection.ReadOnly)
+        self.set_category(connection.Category)
 
     def create_connection(self) -> InfluxDbConnection:
         return InfluxDbConnection.create(
@@ -213,6 +230,7 @@ class ConnectionDialog(QDialog):
         connection.Password = self.password() or None
         connection.UseSsl = self.use_ssl()
         connection.ReadOnly = self.read_only()
+        connection.Category = self.category()
 
     # -- test / ping ---------------------------------------------------------------
 
@@ -1398,3 +1416,344 @@ class WritePointDialog(QDialog):
 
     def retention_policy(self) -> Optional[str]:
         return self.rp_edit.text().strip() or None
+
+
+# ---------------------------------------------------------------------------
+# CSV import wizard (1.3.0)
+# ---------------------------------------------------------------------------
+
+class CsvImportDialog(QDialog):
+    """Pick a CSV file, map columns to time/tag/field, then import.
+
+    The dialog only collects the plan; parsing and the batched write run
+    afterwards on a worker thread (see MainWindow.import_csv)."""
+
+    def __init__(self, database: str, measurement: str = "",
+                 parent: QWidget = None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("import.dialog.title"))
+        self.resize(640, 520)
+        self.database = database
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        # file + delimiter + header
+        file_box = QHBoxLayout()
+        self.file_edit = QLineEdit()
+        browse = QPushButton(tr("import.browse"))
+        browse.clicked.connect(self._browse)
+        file_box.addWidget(self.file_edit, 1)
+        file_box.addWidget(browse)
+        form.addRow(tr("import.file"), file_box)
+
+        opts_box = QHBoxLayout()
+        self.delimiter_edit = QLineEdit(",")
+        self.delimiter_edit.setMaximumWidth(40)
+        self.delimiter_edit.setToolTip(tr("import.delimiter.tip"))
+        self.header_check = QCheckBox(tr("import.has_header"))
+        self.header_check.setChecked(True)
+        load_btn = QPushButton(tr("import.load_preview"))
+        load_btn.clicked.connect(self._load_preview)
+        opts_box.addWidget(self.delimiter_edit)
+        opts_box.addWidget(self.header_check)
+        opts_box.addWidget(load_btn)
+        opts_box.addStretch(1)
+        form.addRow(tr("import.options"), opts_box)
+
+        # preview grid
+        self.preview = QTableWidget(0, 0)
+        self.preview.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.preview.setMaximumHeight(180)
+        layout.addWidget(self.preview, 1)
+
+        # column mapping (combos are created per loaded file)
+        self.mapping_box = QWidget()
+        self.mapping_layout = QVBoxLayout(self.mapping_box)
+        self.mapping_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QVBoxLayout()
+        scroll.addWidget(self.mapping_box)
+        layout.addLayout(scroll)
+        self._mapping_combos: List[QComboBox] = []
+        self._headers: List[str] = []
+
+        form2 = QFormLayout()
+        layout.addLayout(form2)
+        self.measurement_edit = QLineEdit(measurement)
+        _form_row(form2, "write.measurement", self.measurement_edit)
+        self.rp_edit = QLineEdit()
+        _form_row(form2, "write.rp", self.rp_edit)
+        self.batch_spin = QSpinBox()
+        self.batch_spin.setRange(1, 100000)
+        self.batch_spin.setValue(csv_import.DEFAULT_BATCH_SIZE)
+        _form_row(form2, "import.batch_size", self.batch_spin)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText(tr("import.start"))
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    # -- plan -----------------------------------------------------------------
+
+    def file_path(self) -> str:
+        return self.file_edit.text().strip()
+
+    def delimiter(self) -> str:
+        return self.delimiter_edit.text() or ","
+
+    def has_header(self) -> bool:
+        return self.header_check.isChecked()
+
+    def mapping(self) -> List[str]:
+        return [c.currentData() for c in self._mapping_combos]
+
+    def measurement(self) -> str:
+        return self.measurement_edit.text().strip()
+
+    def retention_policy(self) -> Optional[str]:
+        return self.rp_edit.text().strip() or None
+
+    def batch_size(self) -> int:
+        return self.batch_spin.value()
+
+    # -- preview --------------------------------------------------------------
+
+    def _browse(self) -> None:
+        start = (self.file_edit.text().strip() or None)
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("import.browse"), start, "CSV (*.csv *.txt);;All (*)")
+        if path:
+            self.file_edit.setText(path)
+
+    def _load_preview(self) -> None:
+        from ..core import csv_import
+        path = self.file_path()
+        if not path or not os.path.exists(path):
+            display_error(tr("import.no_file"), parent=self)
+            return
+        try:
+            headers, rows = csv_import.read_rows(
+                path, self.delimiter(),
+                has_header=self.has_header())
+        except Exception as ex:
+            display_exception(ex, parent=self)
+            return
+        if not headers:
+            display_error(tr("import.empty_file"), parent=self)
+            return
+        self._headers = headers
+        self._rebuild_preview(headers, rows[:csv_import.PREVIEW_ROWS])
+        guess = csv_import.guess_mapping(headers, rows[:csv_import.PREVIEW_ROWS])
+        self._rebuild_mapping(headers, guess)
+
+    def _rebuild_preview(self, headers, rows) -> None:
+        self.preview.setRowCount(len(rows))
+        self.preview.setColumnCount(len(headers))
+        self.preview.setHorizontalHeaderLabels(headers)
+        for r, row in enumerate(rows):
+            for c, value in enumerate(row):
+                self.preview.setItem(r, c, QTableWidgetItem(str(value)))
+
+    def _rebuild_mapping(self, headers, guess) -> None:
+        while self.mapping_layout.count():
+            item = self.mapping_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self._mapping_combos = []
+        for idx, name in enumerate(headers):
+            row_box = QHBoxLayout()
+            row_box.addWidget(QLabel(name))
+            combo = QComboBox()
+            for role in csv_import.ROLES:
+                combo.addItem(tr(f"import.role.{role}"), role)
+                if idx < len(guess) and guess[idx] == role:
+                    combo.setCurrentIndex(combo.count() - 1)
+            self._mapping_combos.append(combo)
+            row_box.addWidget(combo, 1)
+            holder = QWidget()
+            holder.setLayout(row_box)
+            self.mapping_layout.addWidget(holder)
+
+    def _on_accept(self) -> None:
+        from ..core import csv_import
+        if not self.file_path():
+            display_error(tr("import.no_file"), parent=self)
+            return
+        if not self.measurement():
+            display_error(tr("write.no_measurement"), parent=self)
+            return
+        mapping = self.mapping()
+        if csv_import.ROLE_FIELD not in mapping \
+                and csv_import.ROLE_FIELD_STRING not in mapping:
+            display_error(tr("import.no_field"), parent=self)
+            return
+        if mapping.count(csv_import.ROLE_TIME) > 1:
+            display_error(tr("import.multi_time"), parent=self)
+            return
+        self.accept()
+
+
+
+
+# ---------------------------------------------------------------------------
+# Conditional delete wizard (1.3.0)
+# ---------------------------------------------------------------------------
+
+class DeleteRangeDialog(QDialog):
+    """Compose a safe ``DELETE FROM "m" WHERE time-range AND conditions``
+    statement with live preview; the actual execution (after a second
+    confirmation) lives in MainWindow.delete_by_condition."""
+
+    OPS = ("=", "!=", ">", ">=", "<", "<=", "=~", "!~")
+
+    def __init__(self, database: str, measurement: str = "",
+                 parent: QWidget = None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("del.dialog.title"))
+        self.resize(560, 420)
+        self.database = database
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self.measurement_edit = QLineEdit(measurement)
+        _form_row(form, "write.measurement", self.measurement_edit)
+
+        self.from_check = QCheckBox(tr("del.from"))
+        self.from_edit = QDateTimeEdit()
+        self.from_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self.from_edit.setDateTime(datetime.now().replace(hour=0, minute=0,
+                                                          second=0))
+        from_box = QHBoxLayout()
+        from_box.addWidget(self.from_check)
+        from_box.addWidget(self.from_edit, 1)
+        form.addRow(from_box)
+        self.to_check = QCheckBox(tr("del.to"))
+        self.to_edit = QDateTimeEdit()
+        self.to_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self.to_edit.setDateTime(datetime.now())
+        to_box = QHBoxLayout()
+        to_box.addWidget(self.to_check)
+        to_box.addWidget(self.to_edit, 1)
+        form.addRow(to_box)
+
+        # conditions list
+        layout.addWidget(QLabel(tr("del.conditions")))
+        self.cond_table = QTableWidget(0, 3)
+        self.cond_table.setHorizontalHeaderLabels([
+            tr("del.column"), tr("del.op"), tr("del.value")])
+        self.cond_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch)
+        layout.addWidget(self.cond_table, 1)
+        cond_btns = QHBoxLayout()
+        add_btn = QPushButton(tr("del.add_condition"))
+        add_btn.clicked.connect(lambda: self._add_condition("", "=", ""))
+        del_btn = QPushButton(tr("del.remove_condition"))
+        del_btn.clicked.connect(self._remove_selected_condition)
+        cond_btns.addWidget(add_btn)
+        cond_btns.addWidget(del_btn)
+        cond_btns.addStretch(1)
+        layout.addLayout(cond_btns)
+
+        layout.addWidget(QLabel(tr("del.preview")))
+        self.preview_label = QLabel("-")
+        self.preview_label.setWordWrap(True)
+        self.preview_label.setStyleSheet(
+            "QLabel { background: #f4f4f4; padding: 6px; }")
+        layout.addWidget(self.preview_label)
+
+        self.measurement_edit.textChanged.connect(self._refresh_preview)
+        self.from_check.toggled.connect(self._refresh_preview)
+        self.to_check.toggled.connect(self._refresh_preview)
+        self.cond_table.itemChanged.connect(self._refresh_preview)
+        self._add_condition("", "=", "")
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText(tr("del.next"))
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._refresh_preview()
+
+    # -- condition rows ---------------------------------------------------------
+
+    def _add_condition(self, column: str, op: str, value: str) -> None:
+        row = self.cond_table.rowCount()
+        self.cond_table.blockSignals(True)
+        self.cond_table.insertRow(row)
+        self.cond_table.setItem(row, 0, QTableWidgetItem(column))
+        self.cond_table.setItem(row, 2, QTableWidgetItem(value))
+        op_combo = QComboBox()
+        for o in self.OPS:
+            op_combo.addItem(o)
+            if o == op:
+                op_combo.setCurrentIndex(op_combo.count() - 1)
+        self.cond_table.setCellWidget(row, 1, op_combo)
+        self.cond_table.blockSignals(False)
+        self._refresh_preview()
+
+    def _remove_selected_condition(self) -> None:
+        rows = sorted({i.row() for i in self.cond_table.selectedIndexes()},
+                      reverse=True)
+        for r in rows:
+            self.cond_table.removeRow(r)
+        if self.cond_table.rowCount() == 0:
+            self._add_condition("", "=", "")
+        self._refresh_preview()
+
+    def conditions(self) -> List[str]:
+        from ..core import query_tools
+        result: List[str] = []
+        for r in range(self.cond_table.rowCount()):
+            col_item = self.cond_table.item(r, 0)
+            val_item = self.cond_table.item(r, 2)
+            column = col_item.text().strip() if col_item else ""
+            value = val_item.text().strip() if val_item else ""
+            if not column or not value:
+                continue
+            op = self.cond_table.cellWidget(r, 1).currentText()
+            # numeric-looking values compare unquoted; leading-zero strings
+            # and everything else stay quoted (same rule as the grid filters)
+            numeric = False
+            try:
+                float(value)
+                numeric = not (value.startswith("0") and len(value) > 1
+                               and not value.startswith("0."))
+            except ValueError:
+                numeric = False
+            result.append(query_tools.build_filter_condition(
+                column, op, value, numeric=numeric))
+        return result
+
+    def time_range_ns(self):
+        start = end = None
+        if self.from_check.isChecked():
+            start = int(self.from_edit.dateTime().toPython().timestamp()
+                        * 1_000_000_000)
+        if self.to_check.isChecked():
+            end = int(self.to_edit.dateTime().toPython().timestamp()
+                      * 1_000_000_000)
+        return start, end
+
+    def delete_statement(self) -> Optional[str]:
+        from ..core import query_tools
+        start, end = self.time_range_ns()
+        return query_tools.build_ranged_delete(
+            self.measurement_edit.text().strip(), start, end,
+            self.conditions())
+
+    def _refresh_preview(self, *args) -> None:
+        statement = self.delete_statement()
+        self.preview_label.setText(statement or tr("del.unsafe"))
+
+    def _on_accept(self) -> None:
+        if not self.measurement_edit.text().strip():
+            display_error(tr("write.no_measurement"), parent=self)
+            return
+        if self.delete_statement() is None:
+            display_error(tr("del.unsafe"), parent=self)
+            return
+        self.accept()

@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover - platformdirs is a hard dependency
     user_config_dir = None
 
 from .models import InfluxDbConnection
+from . import secrets
 
 # Time/date format strings (same semantics as the C# version)
 TIME_FORMAT_12_HOUR = "hh:mm:ss tt"
@@ -102,7 +103,12 @@ class AppSettings:
             "DateFormat": self.date_format,
             "AllowUntrustedSsl": self.allow_untrusted_ssl,
             "Language": self.language,
-            "Connections": [c.to_dict() for c in self.connections],
+            # Passwords are encrypted at rest (DPAPI on Windows); in-memory
+            # connections always hold plaintext.
+            "Connections": [
+                {**c.to_dict(), "Password": secrets.protect(c.Password or "")}
+                for c in self.connections
+            ],
             "QueryScripts": self.query_scripts,
             "ActiveQueryTab": self.active_query_tab,
             "LastExportDir": self.last_export_dir,
@@ -118,6 +124,9 @@ class AppSettings:
         self.connections = []
         for item in items:
             try:
+                if isinstance(item, dict) and item.get("Password"):
+                    item = {**item,
+                            "Password": secrets.unprotect(item["Password"])}
                 self.connections.append(InfluxDbConnection.from_dict(item))
             except Exception:
                 continue

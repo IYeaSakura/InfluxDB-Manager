@@ -435,3 +435,210 @@ class TestReadOnlyConnection:
         assert d.ReadOnly is False
         # C#-era exports (no ReadOnly key) still load
         assert "UseSsl" in d.to_dict() and "ReadOnly" in d.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# 1.3.0: CSV import
+# ---------------------------------------------------------------------------
+
+class TestCsvImport:
+    CSV_TEXT = (
+        "time,device,temp,humidity,note\n"
+        "2026-09-29T00:00:00Z,a,21.5,60,ok\n"
+        "2026-09-29T00:01:00Z,b,22,61,\n"
+        "2026-09-29T00:02:00Z,a,not-a-number,62,ok\n"
+    )
+
+    def _write(self, tmp_path, text=None):
+        p = tmp_path / "data.csv"
+        p.write_text(text if text is not None else self.CSV_TEXT,
+                     encoding="utf-8")
+        return str(p)
+
+    def test_read_rows_with_header(self, tmp_path):
+        from net.sakurain.influxdbstudio.core import csv_import
+        headers, rows = csv_import.read_rows(self._write(tmp_path))
+        assert headers == ["time", "device", "temp", "humidity", "note"]
+        assert len(rows) == 3
+
+    def test_read_rows_without_header(self, tmp_path):
+        from net.sakurain.influxdbstudio.core import csv_import
+        path = self._write(tmp_path, "1,2\n3,4\n")
+        headers, rows = csv_import.read_rows(path, has_header=False)
+        assert headers == ["column_1", "column_2"]
+        assert rows == [["1", "2"], ["3", "4"]]
+
+    def test_read_rows_custom_delimiter(self, tmp_path):
+        from net.sakurain.influxdbstudio.core import csv_import
+        path = self._write(tmp_path, "a;b\n1;2\n")
+        headers, _ = csv_import.read_rows(path, ";")
+        assert headers == ["a", "b"]
+
+    def test_guess_mapping(self):
+        from net.sakurain.influxdbstudio.core import csv_import
+        headers = ["time", "device", "temp", "note"]
+        sample = [["2026-09-29T00:00:00Z", "a", "21.5", "x"]]
+        assert csv_import.guess_mapping(headers, sample) == [
+            csv_import.ROLE_TIME, csv_import.ROLE_TAG,
+            csv_import.ROLE_FIELD, csv_import.ROLE_TAG,
+        ]
+
+    def test_parse_points_types_and_tags(self, tmp_path):
+        from net.sakurain.influxdbstudio.core import csv_import
+        headers, rows = csv_import.read_rows(self._write(tmp_path))
+        mapping = [csv_import.ROLE_TIME, csv_import.ROLE_TAG,
+                   csv_import.ROLE_FIELD, csv_import.ROLE_FIELD,
+                   csv_import.ROLE_IGNORE]
+        result = csv_import.parse_points(headers, rows, mapping, "weather")
+        # middle row has empty note column ignored; all 3 rows parse
+        assert len(result.points) == 3
+        p0 = result.points[0]
+        assert p0.Measurement == "weather"
+        assert p0.Tags == {"device": "a"}
+        assert p0.Fields["temp"] == 21.5
+        assert p0.Fields["humidity"] == 60
+        assert "note" not in p0.Fields
+        assert p0.TimeStampNs is not None
+
+    def test_parse_points_field_string_forces_string(self, tmp_path):
+        from net.sakurain.influxdbstudio.core import csv_import
+        path = self._write(tmp_path, "code\n042760236\n")
+        headers, rows = csv_import.read_rows(path)
+        result = csv_import.parse_points(
+            headers, rows, [csv_import.ROLE_FIELD_STRING], "m")
+        assert result.points[0].Fields["code"] == "042760236"
+
+    def test_parse_points_bad_time_is_error_not_crash(self):
+        from net.sakurain.influxdbstudio.core import csv_import
+        headers = ["time", "v"]
+        rows = [["not-a-time", "1"], ["2026-09-29T00:00:00Z", "2"]]
+        result = csv_import.parse_points(
+            headers, rows, [csv_import.ROLE_TIME, csv_import.ROLE_FIELD], "m")
+        assert len(result.points) == 1
+        assert len(result.errors) == 1
+        assert result.errors[0].line == 1
+
+    def test_parse_points_requires_measurement_and_field(self):
+        from net.sakurain.influxdbstudio.core import csv_import
+        r1 = csv_import.parse_points(["v"], [["1"]],
+                                     [csv_import.ROLE_FIELD], "")
+        assert not r1.ok
+        r2 = csv_import.parse_points(["v"], [["1"]],
+                                     [csv_import.ROLE_TAG], "m")
+        assert not r2.ok
+
+    def test_batches_split(self):
+        from net.sakurain.influxdbstudio.core import csv_import
+        from net.sakurain.influxdbstudio.core.models import InfluxDbPoint
+        pts = [InfluxDbPoint("m", fields={"v": i}) for i in range(7)]
+        chunks = csv_import.batches(pts, 3)
+        assert [len(c) for c in chunks] == [3, 3, 1]
+        # falsy size falls back to the default (single batch here)
+        assert [len(c) for c in csv_import.batches(pts, 0)] == [7]
+        assert [len(c) for c in csv_import.batches(pts, 1)] == [1] * 7
+
+
+# ---------------------------------------------------------------------------
+# 1.3.0: ranged DELETE
+# ---------------------------------------------------------------------------
+
+class TestRangedDelete:
+    def test_time_range_only(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        stmt = query_tools.build_ranged_delete("m", 1_000_000_000,
+                                               2_000_000_000)
+        assert stmt == ('DELETE FROM "m" WHERE '
+                        "time >= '1970-01-01T00:00:01.000000000Z' "
+                        "AND time < '1970-01-01T00:00:02.000000000Z'")
+
+    def test_conditions_only(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        stmt = query_tools.build_ranged_delete(
+            "m", conditions=['"site" = \'a\''])
+        assert stmt == 'DELETE FROM "m" WHERE ("site" = \'a\')'
+
+    def test_refuses_full_measurement_delete(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        assert query_tools.build_ranged_delete("m") is None
+        assert query_tools.build_ranged_delete("") is None
+        assert query_tools.build_ranged_delete("m", conditions=[]) is None
+
+    def test_measurement_escaping(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        stmt = query_tools.build_ranged_delete('we"ird', 0, None)
+        assert 'FROM "we\\"ird"' in stmt
+
+
+# ---------------------------------------------------------------------------
+# 1.3.0: password protection at rest
+# ---------------------------------------------------------------------------
+
+class TestSecrets:
+    def test_roundtrip(self):
+        from net.sakurain.influxdbstudio.core import secrets
+        cipher = secrets.protect("sa")
+        assert cipher != "sa"
+        assert secrets.is_protected(cipher)
+        assert secrets.unprotect(cipher) == "sa"
+
+    def test_plaintext_passthrough(self):
+        from net.sakurain.influxdbstudio.core import secrets
+        assert secrets.protect("") == ""
+        assert secrets.unprotect("plain") == "plain"
+        assert not secrets.is_protected("plain")
+        assert not secrets.is_protected("")
+
+    def test_settings_roundtrip_encrypts_at_rest(self, tmp_path, monkeypatch):
+        import net.sakurain.influxdbstudio.core.settings as sm
+        monkeypatch.setattr(sm, "_settings_path",
+                            lambda: str(tmp_path / "s.json"))
+        s = sm.AppSettings()
+        from net.sakurain.influxdbstudio.core.models import InfluxDbConnection
+        c = InfluxDbConnection.create(name="n", host="h", port=8086,
+                                      username="u", password="sa")
+        s.connections = [c]
+        s.save_all()
+        raw = json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))
+        stored = raw["Connections"][0]["Password"]
+        assert stored != "sa" or not sm.secrets.available()
+        # reload restores plaintext in memory
+        s2 = sm.AppSettings()
+        s2.load_all()
+        assert s2.connections[0].Password == "sa"
+
+    def test_export_stays_csharp_compatible(self, tmp_path, monkeypatch):
+        """The export file keeps plaintext passwords so the C# version (and
+        older releases) can import it."""
+        import net.sakurain.influxdbstudio.core.settings as sm
+        monkeypatch.setattr(sm, "_settings_path",
+                            lambda: str(tmp_path / "s.json"))
+        s = sm.AppSettings()
+        from net.sakurain.influxdbstudio.core.models import InfluxDbConnection
+        c = InfluxDbConnection.create(name="n", host="h", port=8086,
+                                      password="sa")
+        s.connections = [c]
+        s.save_all()  # encrypted at rest
+        exported = json.loads(s.to_export_json())
+        assert exported["Connections"][0]["Password"] == "sa"
+        # and an export containing our own encrypted blob still imports
+        s2 = sm.AppSettings.from_export_json(s.to_export_json())
+        assert s2.connections[0].Password == "sa"
+
+
+# ---------------------------------------------------------------------------
+# 1.3.0: connection categories
+# ---------------------------------------------------------------------------
+
+class TestConnectionCategory:
+    def test_roundtrip(self):
+        from net.sakurain.influxdbstudio.core.models import InfluxDbConnection
+        c = InfluxDbConnection.create(name="n", host="h", port=8086)
+        c.Category = "production"
+        d = InfluxDbConnection.from_dict(c.to_dict())
+        assert d.Category == "production"
+
+    def test_defaults_empty_and_csharp_compatible(self):
+        from net.sakurain.influxdbstudio.core.models import InfluxDbConnection
+        d = InfluxDbConnection.from_dict({"Id": "x", "Name": "n"})
+        assert d.Category == ""
+        assert "Category" in d.to_dict()

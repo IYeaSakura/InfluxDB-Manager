@@ -27,6 +27,7 @@ Core features inherited from the original project's design and reimplemented in 
 
 - Create, edit, delete, and clone InfluxDB connections (host, port, credentials, database, SSL)
 - **Read-only connections**: mark a connection read-only to block all edits, row deletions, and point writes (menu items disable automatically)
+- **Connection categories (1.3.0)**: tag a connection as Development / Test / Production; the tree colors the connection node accordingly (green / orange / red), DBeaver-style environment marking
 - Test / Ping a connection before saving it
 - Optional "allow untrusted SSL certificates" setting per application
 - Connection tree browser: Connection -> Databases -> Measurements, lazily expanded on demand
@@ -67,6 +68,8 @@ Core features inherited from the original project's design and reimplemented in 
 - Backfill builder: visually compose a backfill query and run it
 - Running queries: `SHOW QUERIES` browser with `KILL QUERY` support (with the C#-compatible "query interrupted" error swallowing)
 - **Write data point**: right-click a database or measurement and compose a single point (measurement, tags, fields, time, retention policy) with line-protocol preview and a second confirmation before writing
+- **CSV import wizard (1.3.0)**: pick a file (custom delimiter or auto-detect, optional header row), preview the first 50 rows, map each column to time / tag / field (auto-typed) / field (forced string) / ignore — roles are auto-guessed from the column names and numeric content; then import in batches (default 5,000 points per write) on a worker thread with a cancelable progress dialog and a per-line failure report
+- **Delete by condition (1.3.0)**: compose `DELETE FROM "m" WHERE time-range AND conditions` with a live statement preview; refuses to run without any time bound or condition (would wipe the whole measurement); double-confirmed before execution
 - **SHOW SHARDS / SHOW SUBSCRIPTIONS**: right-click a connection to browse shards and subscriptions (read-only)
 
 ### Measurement Exploration
@@ -89,6 +92,7 @@ Core features inherited from the original project's design and reimplemented in 
 - 12/24-hour time format and date format (month-first or day-first)
 - Language switch: **Chinese (default) / English**, applied live
 - Settings import / export as JSON, **compatible with the C# version** (PascalCase keys, interchangeable in both directions)
+- **Passwords encrypted at rest (1.3.0)**: connection passwords in settings.json are protected with Windows DPAPI (current-user scope, no extra dependencies); in memory they stay plaintext and exported setting files remain plaintext for C# interoperability
 - Settings stored per-user via `platformdirs` (no admin rights required)
 
 ---
@@ -391,9 +395,9 @@ Every control inherits `RequestControl`, which wraps `run_async` and marshals re
 
 | Suite | Checks | Server Required | What It Verifies |
 |-------|--------|-----------------|------------------|
-| `test_core.py` + `test_query_tools.py` | 90 | No | Statements, line protocol, settings round-trip, pagination, DELETE builder, comment stripping, filter/order injection, query history, read-only connections |
+| `test_core.py` + `test_query_tools.py` | 109 | No | Statements, line protocol, settings round-trip, pagination, DELETE builder, comment stripping, filter/order injection, query history, read-only connections, CSV import mapping, ranged DELETE, DPAPI secrets, connection categories |
 | `e2e_gui.py` | 40 | No (FakeClient) | Full GUI regression: tree, dialogs, controls, exports |
-| `e2e_dbeaver.py --part2` | 124 | No (FakeClient) | Editing, dirty marks, row deletion, confirm dialog, pager input, header menu, sorting, comments, edit bar, column filters, time ordering, Calc panel, history, write dialog, shards browser |
+| `e2e_dbeaver.py --part2` | 133 | No (FakeClient) | Editing, dirty marks, row deletion, confirm dialog, pager input, header menu, sorting, comments, edit bar, column filters, time ordering, Calc panel, history, write dialog, shards browser, import/delete wizards, category colors |
 | `e2e_dbeaver.py --part1` | 7 | Yes (read-only) | Real-server pagination, LIMIT/OFFSET injection, COUNT totals |
 | `e2e_readonly.py` | - | Yes (read-only) | Read-only guarantees against a production-like server |
 

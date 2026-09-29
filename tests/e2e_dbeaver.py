@@ -1107,6 +1107,79 @@ finally:
     win.close()
 
 # ===========================================================================
+# 1.3.0：CSV 导入 / 按条件删除 / 连接分组
+# ===========================================================================
+print("== 1.3.0 新功能 ==")
+
+import tempfile as _tf2
+from net.sakurain.influxdbstudio.core import csv_import as _csv_mod
+
+_csv_path = _tf2.mktemp(suffix=".csv")
+with open(_csv_path, "w", encoding="utf-8") as _f:
+    _f.write("time,device,temp,note\n"
+             "2026-09-29T00:00:00Z,a,21.5,x\n"
+             "2026-09-29T00:01:00Z,b,22,y\n")
+
+imp = dlg_mod.CsvImportDialog("zn_data")
+imp.file_edit.setText(_csv_path)
+imp._load_preview()
+check("导入-预览行列", imp.preview.rowCount() == 2
+      and imp.preview.columnCount() == 4,
+      f"{imp.preview.rowCount()}x{imp.preview.columnCount()}")
+check("导入-自动映射猜测", imp.mapping() == [
+    _csv_mod.ROLE_TIME, _csv_mod.ROLE_TAG, _csv_mod.ROLE_FIELD,
+    _csv_mod.ROLE_TAG], str(imp.mapping()))
+# 没有 field 列时拒绝开始
+imp_no_field = dlg_mod.CsvImportDialog("zn_data")
+imp_no_file_modals = len(MODALS)
+imp_no_field.file_edit.setText(_csv_path)
+imp_no_field._load_preview()
+for c in imp_no_field._mapping_combos:
+    c.setCurrentIndex(c.findData(_csv_mod.ROLE_TAG))
+modals_before = len(MODALS)
+imp_no_field._on_accept()
+check("导入-无 field 拒绝并提示",
+      any(m[0] == "critical" for m in MODALS[modals_before:]),
+      str(MODALS[modals_before:]))
+
+del_dlg = dlg_mod.DeleteRangeDialog("zn_data", "curveData3761")
+check("删除-预填 measurement",
+      del_dlg.measurement_edit.text() == "curveData3761")
+check("删除-无条件时预览拒绝文案",
+      del_dlg.preview_label.text() == _tr("del.unsafe"),
+      del_dlg.preview_label.text())
+# 填一条条件后生成语句
+del_dlg.cond_table.item(0, 0).setText("nmunicateAddr")
+del_dlg.cond_table.item(0, 2).setText("042760236")
+stmt = del_dlg.delete_statement()
+check("删除-条件生成语句",
+      stmt == 'DELETE FROM "curveData3761" '
+              'WHERE ("nmunicateAddr" = \'042760236\')', str(stmt))
+del_dlg.from_check.setChecked(True)
+del_dlg.to_check.setChecked(True)
+stmt2 = del_dlg.delete_statement()
+check("删除-时间范围并入语句",
+      stmt2 is not None and "time >=" in stmt2 and "time <" in stmt2
+      and 'nmunicateAddr' in stmt2, str(stmt2))
+
+# 连接分组颜色作用于树节点
+_conn_prod = InfluxDbConnection.create(name="prod-db", host="h", port=8086)
+_conn_prod.Category = "production"
+_node_prod = mw_module.MainWindow._make_node(
+    "prod-db", mw_module.NodeType.Connection, _conn_prod)
+check("分组-生产连接红色",
+      _node_prod.foreground(0).color().name() == "#c00000",
+      _node_prod.foreground(0).color().name())
+_conn_dev = InfluxDbConnection.create(name="dev-db", host="h", port=8086)
+_node_dev = mw_module.MainWindow._make_node(
+    "dev-db", mw_module.NodeType.Connection, _conn_dev)
+check("分组-无分组不着色",
+      _node_dev.foreground(0).style() == Qt.NoBrush)
+
+import os as _os2
+_os2.unlink(_csv_path)
+
+# ===========================================================================
 # 汇总
 # ===========================================================================
 fails = [r for r in RESULTS if r[0] == "FAIL"]

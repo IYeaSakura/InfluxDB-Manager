@@ -412,7 +412,26 @@ class MainWindow(QMainWindow):
         icon = NODE_ICONS.get(node_type)
         if icon:
             item.setIcon(0, load_icon(icon))
+        if node_type == NodeType.Connection and connection is not None:
+            MainWindow._apply_category_style(item, connection)
         return item
+
+    # 1.3.0: DBeaver-style connection categories color the tree node text
+    CATEGORY_COLORS = {
+        "production": "#c00000",
+        "test": "#b06000",
+        "development": "#2e7d32",
+    }
+
+    @staticmethod
+    def _apply_category_style(node: QTreeWidgetItem,
+                              connection: InfluxDbConnection) -> None:
+        from PySide6.QtGui import QBrush, QColor
+        color = MainWindow.CATEGORY_COLORS.get(connection.Category or "")
+        if color:
+            node.setForeground(0, QBrush(QColor(color)))
+        else:
+            node.setForeground(0, QBrush())  # reset to the default style
 
     def _connection_of(self, node: QTreeWidgetItem) -> Optional[InfluxDbConnection]:
         current = node
@@ -482,6 +501,10 @@ class MainWindow(QMainWindow):
                                   lambda: self.run_backfill(item))
             self._add_menu_action(menu, "ctx.database.write_point",
                                   lambda: self.write_point(item))
+            self._add_menu_action(menu, "ctx.database.import_csv",
+                                  lambda: self.import_csv(item))
+            self._add_menu_action(menu, "ctx.database.delete_by_condition",
+                                  lambda: self.delete_by_condition(item))
             menu.addSeparator()
             if item.text(0) != "_internal":
                 self._add_menu_action(menu, "ctx.database.drop_database",
@@ -499,6 +522,10 @@ class MainWindow(QMainWindow):
                                   lambda: self.show_field_keys(item))
             self._add_menu_action(menu, "ctx.measurement.write_point",
                                   lambda: self.write_point(item))
+            self._add_menu_action(menu, "ctx.measurement.import_csv",
+                                  lambda: self.import_csv(item))
+            self._add_menu_action(menu, "ctx.measurement.delete_by_condition",
+                                  lambda: self.delete_by_condition(item))
             menu.addSeparator()
             self._add_menu_action(menu, "ctx.measurement.drop_measurement",
                                   lambda: self.drop_measurement(item))
@@ -659,6 +686,7 @@ class MainWindow(QMainWindow):
         try:
             if update:
                 connection_node.setText(0, connection.Name)
+                self._apply_category_style(connection_node, connection)
                 connection_node.setExpanded(False)
                 connection_node.takeChildren()
 
@@ -1019,7 +1047,7 @@ class MainWindow(QMainWindow):
                          fields=", ".join(f"{k}={v}" for k, v in
                                           sorted(point.Fields.items())),
                          time=point.Time or tr("write.time.now"))
-            if not confirm(tr("write.confirm.title"), preview, parent=self):
+            if not confirm(self, preview, tr("write.confirm.title")):
                 return
             rp = dialog.retention_policy()
             response = client.write(database, point=point,
@@ -1029,6 +1057,161 @@ class MainWindow(QMainWindow):
                     self, tr("write.success.title"), tr("write.success"))
             else:
                 display_error(response.Body or tr("write.failed"), parent=self)
+        except Exception as ex:
+            display_exception(ex, parent=self)
+
+    # -- CSV import + conditional delete (1.3.0) -------------------------------
+
+    def import_csv(self, node: QTreeWidgetItem) -> None:
+        """Import a CSV file into the database via a mapped point write."""
+        from .dialogs import CsvImportDialog
+        from ..core import csv_import
+        from ..core.async_utils import run_async
+        from PySide6.QtCore import Qt as _Qt, QObject as _QObject, Signal as _Signal
+        from PySide6.QtWidgets import QProgressDialog
+
+        try:
+            connection = self._connection_of(node)
+            if connection is None:
+                return
+            if connection.ReadOnly:
+                display_error(tr("read_only.blocked"), parent=self)
+                return
+            client = self._client_for(connection)
+            node_type = self._node_type(node)
+            database = ""
+            measurement = ""
+            if node_type == NodeType.Database:
+                database = node.text(0)
+            elif node_type == NodeType.Measurement:
+                measurement = node.text(0)
+                parent = node.parent()
+                database = parent.text(0) if parent is not None else ""
+            if not database:
+                display_error(tr("write.no_database"), parent=self)
+                return
+            dialog = CsvImportDialog(database, measurement, parent=self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+
+            class _Progress(_QObject):
+                progressed = _Signal(int, int)    # done, total batches
+                finished = _Signal(object)        # report dict
+                failed = _Signal(object)
+
+            progress = _Progress()
+            state = {"cancel": False}
+
+            def work() -> dict:
+                headers, rows = csv_import.read_rows(
+                    dialog.file_path(), dialog.delimiter(),
+                    has_header=dialog.has_header())
+                result = csv_import.parse_points(
+                    headers, rows, dialog.mapping(), dialog.measurement())
+                chunks = csv_import.batches(result.points, dialog.batch_size())
+                written = 0
+                failed_rows = 0
+                errors = [tr("import.line_error", line=e.line, msg=e.message)
+                          for e in result.errors]
+                for i, chunk in enumerate(chunks):
+                    if state["cancel"]:
+                        break
+                    try:
+                        response = client.write(
+                            database, points=chunk,
+                            retention_policy=dialog.retention_policy())
+                        if response.Success:
+                            written += len(chunk)
+                        else:
+                            failed_rows += len(chunk)
+                            errors.append(tr(
+                                "import.batch_error", n=len(chunk),
+                                msg=response.Body or "?"))
+                    except Exception as ex:  # noqa: BLE001 - reported per batch
+                        failed_rows += len(chunk)
+                        errors.append(tr("import.batch_error", n=len(chunk),
+                                         msg=str(ex)))
+                    progress.progressed.emit(i + 1, len(chunks))
+                return {
+                    "written": written, "failed_rows": failed_rows,
+                    "total": len(result.points), "errors": errors,
+                    "cancelled": state["cancel"],
+                }
+
+            bar = QProgressDialog(tr("import.running"), tr("import.cancel"),
+                                  0, 1, self)
+            bar.setWindowModality(_Qt.WindowModal)
+            bar.setMinimumDuration(200)
+            bar.canceled.connect(lambda: state.update(cancel=True))
+
+            def _on_progress(done: int, total: int) -> None:
+                bar.setMaximum(max(1, total))
+                bar.setValue(done)
+
+            def _on_done(report: dict) -> None:
+                bar.close()
+                self._show_import_report(report)
+
+            progress.progressed.connect(_on_progress)
+            progress.finished.connect(_on_done)
+            progress.failed.connect(
+                lambda ex: (bar.close(), display_exception(ex, parent=self)))
+            run_async(work, progress.finished.emit, progress.failed.emit)
+        except Exception as ex:
+            display_exception(ex, parent=self)
+
+    def _show_import_report(self, report: dict) -> None:
+        lines = [tr("import.report.total", n=report["total"]),
+                 tr("import.report.written", n=report["written"]),
+                 tr("import.report.failed", n=report["failed_rows"])]
+        if report.get("cancelled"):
+            lines.append(tr("import.report.cancelled"))
+        text = "\n".join(lines)
+        errors = report.get("errors") or []
+        if errors:
+            text += "\n\n" + "\n".join(errors[:20])
+            if len(errors) > 20:
+                text += f"\n… ({len(errors) - 20} more)"
+        QMessageBox.information(self, tr("import.report.title"), text)
+
+    def delete_by_condition(self, node: QTreeWidgetItem) -> None:
+        """Delete rows by time range + conditions (double-confirmed)."""
+        from .dialogs import DeleteRangeDialog
+        try:
+            connection = self._connection_of(node)
+            if connection is None:
+                return
+            if connection.ReadOnly:
+                display_error(tr("read_only.blocked"), parent=self)
+                return
+            client = self._client_for(connection)
+            node_type = self._node_type(node)
+            database = ""
+            measurement = ""
+            if node_type == NodeType.Database:
+                database = node.text(0)
+            elif node_type == NodeType.Measurement:
+                measurement = node.text(0)
+                parent = node.parent()
+                database = parent.text(0) if parent is not None else ""
+            if not database:
+                display_error(tr("write.no_database"), parent=self)
+                return
+            dialog = DeleteRangeDialog(database, measurement, parent=self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            statement = dialog.delete_statement()
+            if not statement:
+                display_error(tr("del.unsafe"), parent=self)
+                return
+            if not confirm(self, statement, tr("del.confirm.title")):
+                return
+            response = client.execute_command(database, statement)
+            if response.Success:
+                QMessageBox.information(
+                    self, tr("del.success.title"), tr("del.success"))
+            else:
+                display_error(response.Body or tr("del.failed"), parent=self)
         except Exception as ex:
             display_exception(ex, parent=self)
 

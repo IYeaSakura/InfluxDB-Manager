@@ -390,3 +390,35 @@ def build_delete_statement(measurement: str,
         key = name.replace('"', '\\"')
         where.append(f'"{key}" = \'{_escape_InfluxQL_string(row_values[i])}\'')
     return f'DELETE FROM "{m}" WHERE ' + " AND ".join(where)
+
+
+# ---------------------------------------------------------------------------
+# Range delete (1.3.0 delete wizard)
+# ---------------------------------------------------------------------------
+
+def build_ranged_delete(measurement: str,
+                        start_ns: Optional[int] = None,
+                        end_ns: Optional[int] = None,
+                        conditions: Optional[Sequence[str]] = None
+                        ) -> Optional[str]:
+    """Build ``DELETE FROM "m" WHERE time >= ... [AND ...]``.
+
+    ``conditions`` are raw InfluxQL predicates (build them with
+    ``build_filter_condition``). Returns None when the statement would
+    delete an entire measurement (no time bounds and no conditions) — the
+    wizard refuses to run those, same safety rule as the grid.
+    """
+    measurement = (measurement or "").strip()
+    if not measurement:
+        return None
+    conditions = [c for c in (conditions or []) if c and c.strip()]
+    if start_ns is None and end_ns is None and not conditions:
+        return None
+    m = measurement.replace('"', '\\"')
+    where: List[str] = []
+    if start_ns is not None:
+        where.append(f"time >= '{ns_to_rfc3339(start_ns)}'")
+    if end_ns is not None:
+        where.append(f"time < '{ns_to_rfc3339(end_ns)}'")
+    where.extend(f"({c})" for c in conditions)
+    return f'DELETE FROM "{m}" WHERE ' + " AND ".join(where)
