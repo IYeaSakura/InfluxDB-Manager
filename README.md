@@ -41,6 +41,9 @@ Core features inherited from the original project's design and reimplemented in 
 - **Ctrl+/** toggles line comments on the current or selected lines; commented lines render gray; scripts starting with `--` comment headers still paginate and count correctly
 - Query script tabs: rename via right-click tab menu; all open scripts (name, connection, database, content, active tab) are **persisted and automatically restored on the next launch**
 - **Query history**: every successful execution is recorded (deduplicated, most-recent first, up to 200 entries, persisted in settings.json); the grid toolbar's history button opens a browsable list — double-click an entry to load it back into the editor, with per-entry and bulk delete
+- **Multi-statement execution**: statements separated by `;` run one-by-one on a worker thread, each producing its own result tab (with row counts); a failing statement stops the run with its error highlighted while other results stay
+- **SQL autocomplete**: keywords (SELECT/FROM/WHERE/LIMIT…) plus the current database's measurements / tag keys / field keys (5-minute TTL metadata cache, graceful degradation to partial results); auto-popup after 2 characters, Ctrl+Space forces a refresh
+- **Query plans**: toolbar buttons send `EXPLAIN` / `EXPLAIN ANALYZE` for a single SELECT and show the plan in a monospace text dialog
 
 ### Result Grid (DBeaver-Style)
 
@@ -52,9 +55,10 @@ Core features inherited from the original project's design and reimplemented in 
 - **Header context menu**: copy column name / copy all column names, sort the current page ascending or descending (numeric-aware, disabled while dirty), **filter this column** (see below), **server-side time sort** on the `time` column (injects `ORDER BY time DESC` and re-queries; click again to cancel), column width fit-values, hide column / show all columns, refresh, export
 - **Column filtering (server-side)**: the filter dialog supports `=` / `!=` / `>` / `>=` / `<` / `<=` / `=~` / `!~`; conditions are injected into the query's WHERE clause and re-executed — active filters show as removable chips above the grid, with a clear-all button; pagination and the `COUNT(*)` total always respect the filters (numeric fields compare unquoted, tags/strings/leading-zero values are quoted, `time` accepts raw expressions like `now() - 1h`); switching query text clears the filters automatically
 - **Calc panel**: selecting numeric cells shows count / average / sum / min / max below the grid
-- **Body context menu**: copy/paste, save/revert changes, delete selected rows, and (only when rows are selected) export selected rows
+- **Body context menu**: copy/paste, save/revert changes, delete selected rows, and **Copy as SQL** (turns selected rows into `SELECT * FROM "m" WHERE time = …` or `DELETE FROM "m" WHERE time = …` statements on the clipboard); the Export Selected Rows entry appears only when rows are selected
 - Selection highlight in blue; copy/paste integrates with the system clipboard (TSV)
 - **Export results**: six formats — CSV / XLSX / XML / Markdown / JSON / HTML; CSV allows a custom delimiter (default `,`) and is written as UTF-8 with BOM for Excel compatibility
+- **Result charting**: the toolbar chart button renders the current query result (numeric columns) as a line chart with time on the X axis and column selection — handy for visualizing monitoring data such as `_internal`
 - **Export All**: re-runs the original query without the pagination `LIMIT` on a worker thread and exports the **complete query result** (not just the current page); the GUI stays responsive with a busy cursor
 - **Export Selected Rows**: exports only the selected rows, available from the body context menu
 - **Export location memory**: the last export directory is remembered across launches
@@ -397,7 +401,7 @@ Every control inherits `RequestControl`, which wraps `run_async` and marshals re
 |-------|--------|-----------------|------------------|
 | `test_core.py` + `test_query_tools.py` | 109 | No | Statements, line protocol, settings round-trip, pagination, DELETE builder, comment stripping, filter/order injection, query history, read-only connections, CSV import mapping, ranged DELETE, DPAPI secrets, connection categories |
 | `e2e_gui.py` | 40 | No (FakeClient) | Full GUI regression: tree, dialogs, controls, exports |
-| `e2e_dbeaver.py --part2` | 133 | No (FakeClient) | Editing, dirty marks, row deletion, confirm dialog, pager input, header menu, sorting, comments, edit bar, column filters, time ordering, Calc panel, history, write dialog, shards browser, import/delete wizards, category colors |
+| `e2e_dbeaver.py --part2` | 144 | No (FakeClient) | Editing, dirty marks, row deletion, confirm dialog, pager input, header menu, sorting, comments, edit bar, column filters, time ordering, Calc panel, history, write dialog, shards browser, import/delete wizards, category colors, multi-statement runs, EXPLAIN plans, copy-as-SQL, result charting, autocomplete |
 | `e2e_dbeaver.py --part1` | 7 | Yes (read-only) | Real-server pagination, LIMIT/OFFSET injection, COUNT totals |
 | `e2e_readonly.py` | - | Yes (read-only) | Read-only guarantees against a production-like server |
 

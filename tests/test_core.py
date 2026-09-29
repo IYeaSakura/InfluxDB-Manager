@@ -642,3 +642,129 @@ class TestConnectionCategory:
         d = InfluxDbConnection.from_dict({"Id": "x", "Name": "n"})
         assert d.Category == ""
         assert "Category" in d.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# 1.4.0: multi-statement scripts, copy-as-SQL, object cache
+# ---------------------------------------------------------------------------
+
+class TestSplitStatements:
+    def test_single(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        assert query_tools.split_statements("SELECT 1") == ["SELECT 1"]
+        assert query_tools.split_statements("SELECT 1;") == ["SELECT 1"]
+
+    def test_multiple(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        stmts = query_tools.split_statements("SELECT 1; SELECT 2 FROM m")
+        assert [s.strip() for s in stmts] == ["SELECT 1", "SELECT 2 FROM m"]
+
+    def test_semicolon_inside_string(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        stmts = query_tools.split_statements(
+            "SELECT * FROM m WHERE note = 'a;b'; SELECT 2")
+        assert len(stmts) == 2
+        assert "'a;b'" in stmts[0]
+
+    def test_comment_only_fragments_dropped(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        stmts = query_tools.split_statements("-- header\nSELECT 1; -- tail")
+        assert [s.strip() for s in stmts] == ["-- header\nSELECT 1"]
+
+    def test_trailing_semicolons_and_empty(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        assert query_tools.split_statements(";;SELECT 1;;") == ["SELECT 1"]
+        assert query_tools.split_statements("") == []
+        assert query_tools.split_statements("-- nothing") == []
+
+
+class TestCopyAsSql:
+    def test_select_for_row(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        stmt = query_tools.build_select_for_row(
+            "m", ["time", "v"], set(),
+            ["2026-09-27T16:00:00Z", 3])
+        assert stmt == ('SELECT * FROM "m" WHERE '
+                        "time = '2026-09-27T16:00:00.000000000Z'")
+
+    def test_select_includes_tag_conditions(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        stmt = query_tools.build_select_for_row(
+            "m", ["time", "site", "v"], {"site"},
+            ["2026-09-27T16:00:00Z", "a'b", 3])
+        assert stmt is not None
+        assert '"site" = \'a\\\'b\'' in stmt
+
+    def test_select_none_without_time(self):
+        from net.sakurain.influxdbstudio.core import query_tools
+        assert query_tools.build_select_for_row(
+            "m", ["v"], set(), [3]) is None
+
+
+class TestObjectCache:
+    def _client(self):
+        from net.sakurain.influxdbstudio.core.models import InfluxDbSeries
+        from net.sakurain.influxdbstudio.core.client import InfluxDbClient
+
+        class _C(InfluxDbClient):
+            def __init__(self):
+                self.queries = []
+
+            def get_measurement_names(self, database, timeout=None):
+                return ["cpu", "mem"]
+
+            def query(self, database, query):
+                self.queries.append(query)
+                if "TAG KEYS" in query:
+                    return [InfluxDbSeries("m", ["tagKey"], None,
+                                           [["host"], ["dc"]])]
+                if "FIELD KEYS" in query:
+                    return [InfluxDbSeries("m", ["fieldKey"], None,
+                                           [["usage"], ["temp"]])]
+                return []
+        return _C()
+
+    def test_collects_and_caches(self):
+        from net.sakurain.influxdbstudio.core import object_cache
+        object_cache.invalidate()
+        client = self._client()
+        names = object_cache.cached_object_names(client, "db")
+        assert names == ["cpu", "dc", "host", "mem", "temp", "usage"]
+        # second call hits the cache: no extra queries
+        object_cache.cached_object_names(client, "db")
+        assert len(client.queries) == 2
+
+    def test_force_refreshes_and_invalidate(self):
+        from net.sakurain.influxdbstudio.core import object_cache
+        object_cache.invalidate()
+        client = self._client()
+        object_cache.cached_object_names(client, "db")
+        object_cache.cached_object_names(client, "db", force=True)
+        assert len(client.queries) == 4
+        object_cache.invalidate(client, "db")
+        object_cache.cached_object_names(client, "db")
+        assert len(client.queries) == 6
+
+    def test_failure_degrades_to_partial_results(self):
+        # a broken measurement listing must not kill the whole refresh:
+        # tag/field keys still come through
+        from net.sakurain.influxdbstudio.core import object_cache
+        object_cache.invalidate()
+        client = self._client()
+        object_cache.cached_object_names(client, "db")
+        client.get_measurement_names = \
+            lambda *a, **k: (_ for _ in ()).throw(ConnectionError("down"))
+        again = object_cache.cached_object_names(client, "db", force=True)
+        assert "cpu" not in again
+        assert "host" in again and "usage" in again
+
+
+class TestPlanText:
+    def test_single_column_series(self):
+        from net.sakurain.influxdbstudio.core.models import InfluxDbSeries
+        from net.sakurain.influxdbstudio.ui.query_extras import \
+            series_to_plan_text
+        series = [InfluxDbSeries("EXPLAIN", ["QUERY PLAN"], None,
+                                 [["SCAN m"], ["FILTER: v > 0"]])]
+        text = series_to_plan_text(series)
+        assert "SCAN m" in text and "FILTER: v > 0" in text

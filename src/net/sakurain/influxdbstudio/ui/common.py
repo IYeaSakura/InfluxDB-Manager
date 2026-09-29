@@ -6,7 +6,7 @@ import os
 import sys
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
+from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (QMessageBox, QPlainTextEdit, QWidget)
 
 from ..i18n import tr
@@ -244,3 +244,69 @@ def _reset_editor_font(editor: QPlainTextEdit) -> None:
     f.setPointSize(getattr(editor, "_base_font_size", f.pointSize()))
     editor.setFont(f)
     editor.setTabStopDistance(4 * editor.fontMetrics().horizontalAdvance(" "))
+
+
+# ---------------------------------------------------------------------------
+# SQL autocomplete (1.4.0)
+# ---------------------------------------------------------------------------
+
+def attach_completer(editor: QPlainTextEdit, provider) -> None:
+    """Attach a case-insensitive auto-completer to the SQL editor.
+
+    ``provider(force: bool) -> Iterable[str]`` returns the candidate words
+    (SQL keywords are always included; the provider adds database object
+    names). Ctrl+Space forces a provider refresh, typing filters live.
+    """
+    from PySide6.QtCore import QStringListModel
+    from PySide6.QtWidgets import QCompleter
+    from PySide6.QtGui import QKeySequence, QShortcut
+
+    candidates = sorted(set(_SQL_KEYWORDS) | set(provider(False) or []))
+    model = QStringListModel(candidates, editor)
+    completer = QCompleter(model, editor)
+    completer.setCaseSensitivity(Qt.CaseInsensitive)
+    completer.setCompletionMode(QCompleter.PopupCompletion)
+    completer.setWidget(editor)
+
+    def _refresh(force: bool = True) -> None:
+        names = set(provider(force) or []) | set(_SQL_KEYWORDS)
+        model.setStringList(sorted(names, key=str.lower))
+
+    # live popup while typing identifiers
+    editor.textChanged.connect(lambda: _maybe_complete(editor, completer))
+
+    force_shortcut = QShortcut(QKeySequence(Qt.CTRL | Qt.Key_Space), editor)
+    force_shortcut.activated.connect(lambda: (_refresh(True),
+                                              _maybe_complete(editor, completer,
+                                                              force_popup=True)))
+    completer.activated.connect(
+        lambda word: _insert_completion(editor, completer, word))
+    editor._sql_completer = completer  # keep alive
+
+
+def _completion_prefix(editor: QPlainTextEdit) -> str:
+    cursor = editor.textCursor()
+    cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+    return cursor.selectedText()
+
+
+def _maybe_complete(editor: QPlainTextEdit, completer,
+                    force_popup: bool = False) -> None:
+    prefix = _completion_prefix(editor)
+    if len(prefix) < 2 and not force_popup:
+        completer.popup().hide()
+        return
+    completer.setCompletionPrefix(prefix)
+    if completer.completionCount() == 0 and not force_popup:
+        completer.popup().hide()
+        return
+    rect = editor.cursorRect()
+    rect.setWidth(completer.popup().sizeHintForColumn(0)
+                  + completer.popup().verticalScrollBar().sizeHint().width())
+    completer.complete(rect)
+
+
+def _insert_completion(editor: QPlainTextEdit, completer, word: str) -> None:
+    cursor = editor.textCursor()
+    cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+    cursor.insertText(word)

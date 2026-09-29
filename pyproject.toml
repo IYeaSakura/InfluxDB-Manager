@@ -1,6 +1,6 @@
 [project]
 name = "net.sakurain.influxdbstudio"
-version = "1.3.0"
+version = "1.4.0"
 description = "InfluxDB Manager — a UI management tool for the InfluxDB (1.x) time series database, rebuilt in Python/PySide6 with new features (DBeaver-style grid, pagination, bilingual UI)"
 readme = "README.md"
 license = { text = "MIT" }

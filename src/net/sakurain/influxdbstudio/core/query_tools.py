@@ -422,3 +422,79 @@ def build_ranged_delete(measurement: str,
         where.append(f"time < '{ns_to_rfc3339(end_ns)}'")
     where.extend(f"({c})" for c in conditions)
     return f'DELETE FROM "{m}" WHERE ' + " AND ".join(where)
+
+
+# ---------------------------------------------------------------------------
+# Multi-statement scripts (1.4.0)
+# ---------------------------------------------------------------------------
+
+def split_statements(script: str) -> List[str]:
+    """Split an editor script into individual statements on ``;`` outside
+    of string literals and ``--`` line comments. Whole-line ``--`` comments
+    are attached to the following statement (so headers stay with their
+    query); trailing inline comments stay in place."""
+    statements: List[str] = []
+    current: List[str] = []
+    in_string = False
+    for line in script.splitlines():
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if in_string:
+                current.append(ch)
+                if ch == "\\" and i + 1 < len(line):
+                    current.append(line[i + 1])
+                    i += 2
+                    continue
+                if ch == "'":
+                    in_string = False
+                i += 1
+                continue
+            if ch == "'":
+                in_string = True
+                current.append(ch)
+            elif ch == "-" and i + 1 < len(line) and line[i + 1] == "-":
+                # keep the rest of the line verbatim (it belongs to this
+                # statement; whole-line comments are kept by lstrip check)
+                current.append(line[i:])
+                i = len(line)
+                continue
+            elif ch == ";":
+                stmt = _strip_trailing_semicolon("".join(current))
+                if stmt:
+                    statements.append(stmt)
+                current = []
+            else:
+                current.append(ch)
+            i += 1
+        current.append("\n")
+    tail = _strip_trailing_semicolon("".join(current))
+    if tail:
+        statements.append(tail)
+    # drop comment-only fragments
+    return [st for st in statements
+            if strip_line_comments(st).strip()]
+
+
+
+def build_select_for_row(measurement: str, columns: Sequence[str],
+                         tag_columns: Set[str],
+                         row_values: Sequence[Any]) -> Optional[str]:
+    """``SELECT * FROM "m" WHERE time = '...' [AND "tag"='v' ...]`` for one
+    result row (the copy-as-SQL counterpart of ``build_delete_statement``)."""
+    col_index = {name: i for i, name in enumerate(columns)}
+    time_idx = col_index.get("time")
+    if time_idx is None or time_idx >= len(row_values):
+        return None
+    ns = timestamp_to_ns(row_values[time_idx])
+    if ns is None:
+        return None
+    m = measurement.replace('"', '\\"')
+    where = [f"time = '{ns_to_rfc3339(ns)}'"]
+    for name in sorted(tag_columns):
+        i = col_index.get(name)
+        if i is None or i >= len(row_values) or row_values[i] is None:
+            continue
+        key = name.replace('"', '\\"')
+        where.append(f'"{key}" = \'{_escape_InfluxQL_string(row_values[i])}\'')
+    return f'SELECT * FROM "{m}" WHERE ' + " AND ".join(where)

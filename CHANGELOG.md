@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.0 — 2026-09-29
+
+向后兼容的功能版本（SQL 编辑器体验增强）。
+
+### 新增
+
+- 多语句分块执行：编辑器中用 `;` 分隔的多条语句按引号/注释感知的拆分器拆成块，逐条在后台线程执行，每条语句各出一个结果页（含各自行数）；某条失败即停止并定位报错，其余结果保留；每条语句独立记入查询历史
+- SQL 自动补全：编辑器挂载 QCompleter，关键字（SELECT / FROM / WHERE / LIMIT…）+ 当前库的 measurement / tag key / field key 元数据（5 分钟 TTL 缓存，失败降级为部分结果）；输入 ≥2 字符自动弹出，Ctrl+Space 强制刷新
+- 查询计划（EXPLAIN / EXPLAIN ANALYZE）：工具栏按钮对单条 SELECT 发送 `EXPLAIN` / `EXPLAIN ANALYZE`，以等宽文本对话框展示执行计划；非 SELECT 拒绝执行
+- 复制为 SQL：结果网格右键将选中行（单/多行）复制为 `SELECT * FROM "m" WHERE time = …` 或 `DELETE FROM "m" WHERE time = …` 语句到剪贴板
+- 结果图表化：结果网格工具栏图表按钮将查询结果（数值列）渲染为折线图（QWidget + QPainter 自绘，无新依赖），time 为 X 轴，支持列选择，适合 `_internal` 等监控数据
+
 ## 1.3.0 — 2026-09-29
 
 向后兼容的功能版本。

@@ -52,6 +52,7 @@ from ..core.models import (
 from ..i18n import tr
 from .common import (
     CHECK_MARK,
+    attach_completer,
     confirm,
     create_sql_editor,
     display_error,
@@ -334,6 +335,12 @@ class QueryResultsControl(RequestControl):
         act_delete = menu.addAction(
             tr("grid.delete_rows", n=len(selected_rows)))
         act_delete.setEnabled(bool(selected_rows) and not self.read_only)
+        # 1.4.0: copy selected rows back as SQL statements
+        act_copy_select = None
+        act_copy_delete = None
+        if selected_rows and self._series is not None:
+            act_copy_select = menu.addAction(tr("grid.copy_as_select"))
+            act_copy_delete = menu.addAction(tr("grid.copy_as_delete"))
         menu.addSeparator()
         dirty_rows = self._dirty_row_count()
         act_save = menu.addAction(tr("grid.save_changes", n=dirty_rows))
@@ -355,6 +362,10 @@ class QueryResultsControl(RequestControl):
             self.paste_clipboard()
         elif action is act_delete:
             self.stage_delete_selected()
+        elif act_copy_select is not None and action is act_copy_select:
+            self.copy_rows_as_sql(delete=False)
+        elif act_copy_delete is not None and action is act_copy_delete:
+            self.copy_rows_as_sql(delete=True)
         elif action is act_save:
             self.save_changes()
         elif action is act_revert:
@@ -427,6 +438,29 @@ class QueryResultsControl(RequestControl):
         self._deleted_rows |= rows
         self._mark_deleted_rows()
         self._notify_dirty()
+
+    def copy_rows_as_sql(self, delete: bool) -> None:
+        """Copy the selected rows back as SELECT / DELETE statements (1.4.0)."""
+        if self._series is None:
+            return
+        rows = sorted({i.row() for i in self.table.selectedItems()})
+        statements = []
+        for r in rows:
+            if not (0 <= r < len(self._series.Values)):
+                continue
+            values = self._series.Values[r]
+            if delete:
+                stmt = query_tools.build_delete_statement(
+                    self._series.Name, self._columns, self._tag_columns,
+                    values)
+            else:
+                stmt = query_tools.build_select_for_row(
+                    self._series.Name, self._columns, self._tag_columns,
+                    values)
+            if stmt:
+                statements.append(stmt)
+        if statements:
+            QApplication.clipboard().setText(";\n".join(statements) + ";")
 
     def _mark_deleted_rows(self) -> None:
         brush = QColor("#ffd6d6")  # light red = staged for deletion
@@ -815,6 +849,7 @@ class QueryControl(RequestControl):
 
         self.editor = create_sql_editor(self)
         self.main_splitter.addWidget(self.editor)
+        attach_completer(self.editor, self._completion_candidates)
 
         results_panel = QWidget()
         results_layout = QVBoxLayout(results_panel)
@@ -876,14 +911,24 @@ class QueryControl(RequestControl):
         self.btn_grid_export = QPushButton(tr("query.export.all"))
         self.btn_grid_history = QPushButton(tr("query.history"))
         self.btn_grid_history.setVisible(False)  # shown once grids exist
+        self.btn_explain = QPushButton(tr("explain.button"))
+        self.btn_explain_analyze = QPushButton(tr("explain.analyze.button"))
+        self.btn_chart = QPushButton(tr("chart.button"))
+        self.btn_chart.setEnabled(False)
         self.btn_grid_save.clicked.connect(self._save_current_grid)
         self.btn_grid_revert.clicked.connect(self._revert_current_grid)
         self.btn_grid_export.clicked.connect(self._export_current_grid)
         self.btn_grid_history.clicked.connect(self._show_history)
+        self.btn_explain.clicked.connect(lambda: self._explain(False))
+        self.btn_explain_analyze.clicked.connect(lambda: self._explain(True))
+        self.btn_chart.clicked.connect(self._show_chart)
         edit_bar.addWidget(self.btn_grid_save)
         edit_bar.addWidget(self.btn_grid_revert)
         edit_bar.addWidget(self.btn_grid_export)
         edit_bar.addWidget(self.btn_grid_history)
+        edit_bar.addWidget(self.btn_explain)
+        edit_bar.addWidget(self.btn_explain_analyze)
+        edit_bar.addWidget(self.btn_chart)
         edit_bar.addStretch(1)
         self.edit_bar_widget = QWidget()
         self.edit_bar_widget.setLayout(edit_bar)
@@ -931,6 +976,73 @@ class QueryControl(RequestControl):
         self.btn_grid_revert.setEnabled(n > 0)
         self.btn_grid_save.setText(tr("grid.save_changes", n=n))
         self.btn_grid_revert.setText(tr("grid.revert_changes"))
+        self.btn_chart.setEnabled(self._chart_columns(control) is not None)
+
+    # -- autocomplete candidates (1.4.0) ----------------------------------------
+
+    def _completion_candidates(self, force: bool = False):
+        from ..core import object_cache
+        if self.influx_client is None or not self.database:
+            return []
+        return object_cache.cached_object_names(
+            self.influx_client, self.database, force=force)
+
+    # -- EXPLAIN (1.4.0) ---------------------------------------------------------
+
+    def _explain(self, analyze: bool) -> None:
+        from .query_extras import ExplainDialog, series_to_plan_text
+        query = self._current_query()
+        statements = query_tools.split_statements(query)
+        if len(statements) != 1 or not query_tools.is_select_query(
+                statements[0]):
+            display_error(tr("explain.unsupported"), parent=self)
+            return
+        statement = ("EXPLAIN ANALYZE " if analyze else "EXPLAIN ") \
+            + statements[0]
+        if self._loading:
+            return
+        self._loading = True
+        self.results_label.setText(tr("query.running"))
+
+        def work():
+            return self.influx_client.query(self.database, statement)
+
+        def done(results):
+            self._loading = False
+            self.results_label.setText("")
+            title = ("explain.analyze.title" if analyze
+                     else "explain.title")
+            ExplainDialog(title, series_to_plan_text(results),
+                          parent=self).exec()
+
+        def failed(ex):
+            self._loading = False
+            self.results_label.setText("")
+            display_exception(ex, parent=self)
+
+        self._run(work, done, failed)
+
+    # -- result chart (1.4.0) ------------------------------------------------------
+
+    def _chart_columns(self, control) -> Optional[List[str]]:
+        """Numeric, non-time columns of the current grid (chartable)."""
+        series = getattr(control, "_series", None)
+        if series is None or not series.Columns:
+            return None
+        columns = [c for c in series.Columns
+                   if c != "time" and c in (control._field_types or {})]
+        return columns or None
+
+    def _show_chart(self) -> None:
+        from .query_extras import ChartDialog
+        control = self._current_results_control()
+        if control is None:
+            return
+        columns = self._chart_columns(control)
+        if columns is None:
+            display_error(tr("chart.no_numeric"), parent=self)
+            return
+        ChartDialog(control._series, columns, parent=self).exec()
 
     # EditorText equivalent
     def get_editor_text(self) -> str:
@@ -1022,6 +1134,11 @@ class QueryControl(RequestControl):
             return
         self._results_count = 0
         query = self._current_query()
+        # Multi-statement script (1.4.0): run each statement in order.
+        statements = query_tools.split_statements(query)
+        if len(statements) > 1:
+            self._execute_statements(statements)
+            return
         # Filters / time ordering are bound to one query text: a new query
         # (re-run) drops them, pagination navigation keeps them.
         if query != getattr(self, "_filters_query", None):
@@ -1085,32 +1202,89 @@ class QueryControl(RequestControl):
                 settings.record_query(self.connection_id, self.database,
                                       query)
             if results:
-                tab_count = 0
                 tab_label = tr("query.group") if is_aggregate else tr("query.results")
-                for result in results:
-                    tab_count += 1
-                    control = QueryResultsControl()
-                    control.influx_client = self.influx_client
-                    control.database = self.database
-                    control.read_only = self.read_only
-                    control.on_dirty_changed = self._sync_edit_bar
-                    control.on_refresh = self.execute_request
-                    control.on_filter_request = self._request_filter
-                    control.on_server_time_sort = self._server_time_sort
-                    self.results_tabs.addTab(control, f"{tab_label} {tab_count}")
-                    self._results_count += control.update_results(result)
-                    # export-all re-runs the original unpaginated query and
-                    # exports this tab's series in full
-                    idx = tab_count - 1
-                    control.export_all_fetcher = (
-                        lambda q=base_query, i=idx, cols=list(control._columns):
-                        self._fetch_all_rows(q, i, cols))
+                self._render_results(results, tab_label, base_query)
             self.results_label.setText(tr(
                 "query.results_label", count=self._results_count, ms=elapsed_ms))
             self._update_pager()
             self._maybe_load_total(base_query)
 
         def failed(_ex):
+            self._loading = False
+            self.results_label.setText("")
+            self._update_pager()
+
+        self._run(work, done, failed)
+
+    def _render_results(self, results, tab_label: str, base_query: str) -> None:
+        """Append one results tab per series (shared by the single-query
+        and multi-statement execution paths)."""
+        tab_count = 0
+        for result in results or []:
+            tab_count += 1
+            control = QueryResultsControl()
+            control.influx_client = self.influx_client
+            control.database = self.database
+            control.read_only = self.read_only
+            control.on_dirty_changed = self._sync_edit_bar
+            control.on_refresh = self.execute_request
+            control.on_filter_request = self._request_filter
+            control.on_server_time_sort = self._server_time_sort
+            self.results_tabs.addTab(control, f"{tab_label} {tab_count}")
+            self._results_count += control.update_results(result)
+            # export-all re-runs the original unpaginated query and
+            # exports this tab's series in full
+            idx = tab_count - 1
+            control.export_all_fetcher = (
+                lambda q=base_query, i=idx, cols=list(control._columns):
+                self._fetch_all_rows(q, i, cols))
+
+    def _execute_statements(self, statements: List[str]) -> None:
+        """Run a multi-statement script sequentially (1.4.0): one tab group
+        per statement; execution stops at the first failing statement."""
+        self._paginating = False
+        self._page = 1
+        self._total = None
+        self._filters = []
+        self._rebuild_filter_bar()
+        while self.results_tabs.count():
+            self.results_tabs.removeTab(0)
+        self._sync_edit_bar()
+        self.results_label.setText(tr("query.running"))
+        self._update_pager()
+        self._loading = True
+        started = time.perf_counter()
+
+        def work():
+            batch = []
+            for i, stmt in enumerate(statements, start=1):
+                try:
+                    results = self.influx_client.query(self.database, stmt)
+                except Exception as ex:  # noqa: BLE001 - reported per statement
+                    return batch, (i, stmt, ex)
+                batch.append((i, stmt, results))
+            return batch, None
+
+        def done(payload):
+            batch, error = payload
+            self._loading = False
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            from ..app import settings
+            for i, stmt, results in batch:
+                settings.record_query(self.connection_id, self.database,
+                                      stmt)
+                label = f'{tr("query.stmt")} {i} · {tr("query.results")}'
+                self._render_results(results, label, stmt)
+            self.results_label.setText(tr(
+                "query.results_label", count=self._results_count,
+                ms=elapsed_ms))
+            self._update_pager()
+            if error is not None:
+                i, stmt, ex = error
+                display_error(tr("query.stmt_failed", n=i, stmt=stmt,
+                                 msg=str(ex)), parent=self)
+
+        def failed(ex):
             self._loading = False
             self.results_label.setText("")
             self._update_pager()

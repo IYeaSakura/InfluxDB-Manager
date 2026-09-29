@@ -485,6 +485,23 @@ _zh_CN = {
     "ctx.database.delete_by_condition": "按条件删除…",
     "ctx.measurement.import_csv": "从 CSV 导入…",
     "ctx.measurement.delete_by_condition": "按条件删除…",
+
+    # -- 1.4.0：多语句执行 / EXPLAIN / 图表 / 复制为 SQL --------------------------------------
+    "query.stmt": "语句",
+    "query.stmt_failed": "语句 {n} 执行失败：{stmt}\n\n{msg}",
+    "grid.copy_as_select": "复制为 SELECT 语句",
+    "grid.copy_as_delete": "复制为 DELETE 语句",
+    "explain.button": "EXPLAIN",
+    "explain.analyze.button": "EXPLAIN ANALYZE",
+    "explain.title": "查询计划 (EXPLAIN)",
+    "explain.analyze.title": "查询计划 (EXPLAIN ANALYZE)",
+    "explain.unsupported": "EXPLAIN 仅支持单条 SELECT 语句。",
+    "explain.empty": "（无查询计划输出）",
+    "chart.button": "图表…",
+    "chart.title": "结果图表",
+    "chart.column": "数值列",
+    "chart.no_data": "没有可绘制的数据（需要 time 列和至少两个数值点）",
+    "chart.no_numeric": "当前结果没有可绘制的数值列。",
 }
 
 _en_US = {
@@ -966,6 +983,23 @@ _en_US = {
     "ctx.database.delete_by_condition": "Delete by Condition...",
     "ctx.measurement.import_csv": "Import from CSV...",
     "ctx.measurement.delete_by_condition": "Delete by Condition...",
+
+    # -- 1.4.0: multi-statement / EXPLAIN / chart / copy-as-SQL ---------------------------------
+    "query.stmt": "Statement",
+    "query.stmt_failed": "Statement {n} failed: {stmt}\n\n{msg}",
+    "grid.copy_as_select": "Copy as SELECT Statement",
+    "grid.copy_as_delete": "Copy as DELETE Statement",
+    "explain.button": "EXPLAIN",
+    "explain.analyze.button": "EXPLAIN ANALYZE",
+    "explain.title": "Query Plan (EXPLAIN)",
+    "explain.analyze.title": "Query Plan (EXPLAIN ANALYZE)",
+    "explain.unsupported": "EXPLAIN supports a single SELECT statement only.",
+    "explain.empty": "(no query plan output)",
+    "chart.button": "Chart...",
+    "chart.title": "Result Chart",
+    "chart.column": "Value column",
+    "chart.no_data": "Nothing to chart (needs a time column and at least two numeric points)",
+    "chart.no_numeric": "The current result has no chartable numeric column.",
 }
 
 _TRANSLATIONS = {

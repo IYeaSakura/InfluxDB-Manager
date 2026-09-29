@@ -1180,6 +1180,94 @@ import os as _os2
 _os2.unlink(_csv_path)
 
 # ===========================================================================
+# 1.4.0：多语句执行 / EXPLAIN / 图表 / 复制为 SQL / 补全
+# ===========================================================================
+print("== 1.4.0 新功能 ==")
+
+import net.sakurain.influxdbstudio.ui.query_extras as _qe
+
+# -- 多语句执行 ---------------------------------------------------------------
+f_client.queries.clear()
+qc_f.editor_text = ('SELECT * FROM "curveData3761" LIMIT 2; '
+                    'SELECT COUNT(*) FROM "curveData3761"')
+qc_f.execute_request()
+ok = wait_for(lambda: not qc_f._loading and qc_f.results_tabs.count() >= 2,
+              timeout_ms=8000)
+check("多语句-两个语句各自出结果页", ok
+      and qc_f.results_tabs.count() == 2,
+      f"tabs={qc_f.results_tabs.count()}")
+check("多语句-逐条发送查询",
+      any("LIMIT 2" in q for q in f_client.queries)
+      and any("COUNT(*)" in q for q in f_client.queries),
+      str(f_client.queries))
+check("多语句-历史逐条记录",
+      len(settings.history_for(qc_f.connection_id)) >= 2)
+
+# -- EXPLAIN ------------------------------------------------------------------
+_explained = {}
+
+
+class _FakeExplainDialog:
+    def __init__(self, title_key, plan_text, parent=None):
+        _explained["title"] = title_key
+        _explained["text"] = plan_text
+
+    def exec(self):
+        return 0
+
+
+_orig_explain = _qe.ExplainDialog
+_qe.ExplainDialog = _FakeExplainDialog
+f_client.queries.clear()
+qc_f.editor_text = 'SELECT * FROM "curveData3761" WHERE "currentA" > 0.5'
+qc_f._explain(False)
+ok = wait_for(lambda: "title" in _explained, timeout_ms=8000)
+check("EXPLAIN-发送 EXPLAIN 前缀查询",
+      ok and any(q.startswith("EXPLAIN ") for q in f_client.queries),
+      str(f_client.queries[:2]))
+check("EXPLAIN-使用 EXPLAIN 标题", _explained.get("title") == "explain.title")
+
+# 非 SELECT 拒绝
+modals_before = len(MODALS)
+qc_f.editor_text = "SHOW MEASUREMENTS"
+qc_f._explain(False)
+check("EXPLAIN-非 SELECT 拒绝并提示",
+      any(m[0] == "critical" for m in MODALS[modals_before:]),
+      str(MODALS[modals_before:]))
+_qe.ExplainDialog = _orig_explain
+
+# -- 图表 ---------------------------------------------------------------------
+rc2._field_types = {"v": "float"}
+_cols = qc_f._chart_columns(rc2)
+check("图表-识别数值列", _cols == ["v"], str(_cols))
+_chart = _qe.ChartDialog(series2, ["v"])
+_chart.show()
+qapp.processEvents()
+_chart.canvas.resize(400, 200)
+_chart.canvas.set_data(series2, "v")
+qapp.processEvents()
+check("图表-生成 3 个数据点", len(_chart.canvas._points) == 3,
+      str(len(_chart.canvas._points)))
+_chart.close()
+
+# -- 复制为 SQL ---------------------------------------------------------------
+rc2.table.clearSelection()
+rc2.table.selectRow(0)
+rc2.copy_rows_as_sql(delete=False)
+_sel_sql = qapp.clipboard().text()
+check("复制为-SELECT 语句", _sel_sql.startswith("SELECT * FROM \"m\" WHERE time = '"),
+      _sel_sql)
+rc2.copy_rows_as_sql(delete=True)
+check("复制为-DELETE 语句", qapp.clipboard().text().startswith("DELETE FROM \"m\" WHERE time = '"),
+      qapp.clipboard().text())
+rc2.table.clearSelection()
+
+# -- 编辑器补全器 --------------------------------------------------------------
+check("补全器已挂载且含关键字",
+      hasattr(qc_f.editor, "_sql_completer")
+      and "select" in qc_f.editor._sql_completer.model().stringList())
+
+# ===========================================================================
 # 汇总
 # ===========================================================================
 fails = [r for r in RESULTS if r[0] == "FAIL"]
