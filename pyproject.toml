@@ -9,6 +9,7 @@ dependencies = [
     "PySide6>=6.5",
     "httpx>=0.24",
     "platformdirs>=3.0",
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]

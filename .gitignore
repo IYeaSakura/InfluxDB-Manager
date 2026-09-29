@@ -17,6 +17,7 @@ exe_test*.log
 .idea/
 .vscode/
 Github-Readme-Writer/
+docs/
 
 # Project
 *.disabled

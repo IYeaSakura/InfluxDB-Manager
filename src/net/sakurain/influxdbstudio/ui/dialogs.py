@@ -11,12 +11,14 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QDateTimeEdit,
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..core import exporters
 from ..core.client import InfluxDbClient, create_client
 from ..core.helper import is_time_interval_valid
 from ..core.models import (
@@ -1055,3 +1058,83 @@ class AboutDialog(QDialog):
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
         self.resize(420, 320)
+
+
+# ---------------------------------------------------------------------------
+# Export dialog (format + CSV delimiter + save location)
+# ---------------------------------------------------------------------------
+
+class ExportDialog(QDialog):
+    """Pick export format (and CSV delimiter), then the save location.
+
+    ``suggest_name`` maps an extension to a default file name. On accept the
+    chosen ``(path, fmt, delimiter)`` is available as :attr:`choice`.
+    """
+
+    def __init__(self, suggest_name, parent: QWidget = None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("export.dialog.title"))
+        self._suggest_name = suggest_name
+        self.choice = None
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.format_combo = QComboBox()
+        for key, label, _ext in exporters.FORMATS:
+            self.format_combo.addItem(label, key)
+        self.format_combo.currentIndexChanged.connect(self._sync_delimiter)
+        form.addRow(tr("export.format"), self.format_combo)
+        self.delimiter_edit = QLineEdit(exporters.DEFAULT_DELIMITER)
+        self.delimiter_edit.setMaxLength(4)
+        self.delimiter_edit.setToolTip(tr("export.delimiter.tip"))
+        tip_box = QWidget()
+        tip_h = QHBoxLayout(tip_box)
+        tip_h.setContentsMargins(0, 0, 0, 0)
+        tip_h.addWidget(self.delimiter_edit, 1)
+        tip_h.addWidget(_info_label("export.delimiter.tip"))
+        form.addRow(tr("export.delimiter"), tip_box)
+        layout.addLayout(form)
+        self._sync_delimiter()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _sync_delimiter(self, *_args) -> None:
+        self.delimiter_edit.setEnabled(self.format_combo.currentData() == "csv")
+
+    def _on_accept(self) -> None:
+        fmt = self.format_combo.currentData()
+        delimiter = self.delimiter_edit.text() or exporters.DEFAULT_DELIMITER
+        if fmt == "csv" and len(delimiter) != 1:
+            display_error(tr("export.bad_delimiter"), parent=self)
+            return
+        ext = exporters.extension(fmt)
+        filters = ";;".join(
+            f"{label} (*.{ex})" for _k, label, ex in exporters.FORMATS)
+        path, _sel = QFileDialog.getSaveFileName(
+            self, tr("export.dialog.title"), self._suggest_name(ext), filters)
+        if not path:
+            return
+        if not path.lower().endswith("." + ext):
+            path += "." + ext
+        self.choice = (path, fmt, delimiter)
+        self.accept()
+
+
+def run_export_dialog(suggest_name, columns, rows,
+                      parent: QWidget = None) -> Optional[int]:
+    """Show the export dialog and write the file on accept.
+
+    Returns the number of exported rows, or None when cancelled.
+    """
+    dialog = ExportDialog(suggest_name, parent=parent)
+    if dialog.exec() != QDialog.Accepted or dialog.choice is None:
+        return None
+    path, fmt, delimiter = dialog.choice
+    exporters.export_rows(path, fmt, columns, rows, delimiter)
+    QMessageBox.information(
+        parent, tr("export.success.title"),
+        tr("export.success", n=len(rows), path=path))
+    return len(rows)

@@ -147,12 +147,19 @@ _zh_CN = {
     "status.running": "正在执行查询…",
     "query.default_editor_text": 'SELECT * FROM "{measurement}" WHERE time > now() - 5m',
     "query.editor_placeholder": "# 在此编辑你的查询 / 降采样器",
-    "query.export.all_csv": "导出全部为 CSV",
-    "query.export.selected_csv": "导出选中行为 CSV",
-    "query.export.all_json": "导出全部为 JSON",
-    "query.export.selected_json": "导出选中行为 JSON",
+    "query.export.all": "导出全部",
+    "query.export.selected": "导出选中行",
     "query.csv_filter": "CSV 文件 (*.csv);;所有文件 (*.*)",
     "query.json_filter": "JSON 文件 (*.json);;所有文件 (*.*)",
+
+    # -- 导出对话框 -----------------------------------------------------------------
+    "export.dialog.title": "导出数据",
+    "export.format": "格式",
+    "export.delimiter": "分隔符",
+    "export.delimiter.tip": "仅 CSV 格式有效，必须是单个字符",
+    "export.bad_delimiter": "分隔符必须是单个字符。",
+    "export.success": "已导出 {n} 行到：\n{path}",
+    "export.success.title": "导出完成",
 
     # -- 结果网格编辑（类 DBeaver）--------------------------------------------------
     "grid.copy": "复制",
@@ -501,12 +508,19 @@ _en_US = {
     "status.running": "Running query…",
     "query.default_editor_text": 'SELECT * FROM "{measurement}" WHERE time > now() - 5m',
     "query.editor_placeholder": "#edit your query / downsamplers here",
-    "query.export.all_csv": "Export All to CSV",
-    "query.export.selected_csv": "Export Selected to CSV",
-    "query.export.all_json": "Export All to JSON",
-    "query.export.selected_json": "Export Selected to JSON",
+    "query.export.all": "Export All",
+    "query.export.selected": "Export Selected Rows",
     "query.csv_filter": "CSV files (*.csv);;All files (*.*)",
     "query.json_filter": "JSON files (*.json);;All files (*.*)",
+
+    # -- Export dialog -------------------------------------------------------------------
+    "export.dialog.title": "Export Data",
+    "export.format": "Format",
+    "export.delimiter": "Delimiter",
+    "export.delimiter.tip": "CSV only; must be a single character",
+    "export.bad_delimiter": "The delimiter must be a single character.",
+    "export.success": "Exported {n} rows to:\n{path}",
+    "export.success.title": "Export Complete",
 
     # -- Result grid editing (DBeaver-like) ----------------------------------------------
     "grid.copy": "Copy",

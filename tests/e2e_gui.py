@@ -281,31 +281,39 @@ if qc.results_tabs.count():
           f"{results_control.table.rowCount()} 行")
     shot(window.tabs.currentWidget(), "query_results")
 
-    # CSV 导出
+    # 导出（CSV / JSON，经统一导出对话框）
+    from net.sakurain.influxdbstudio.core import exporters as _exp
+    from net.sakurain.influxdbstudio.ui import dialogs as _dialogs
+
+    def _drive_export(control, only_selected, path, fmt="csv", delimiter=","):
+        SAVE_DIALOG_RESPONSES.append((path, ""))
+        dlg = _dialogs.ExportDialog(control._suggest_name, parent=control)
+        keys = [k for k, _l, _e in _exp.FORMATS]
+        dlg.format_combo.setCurrentIndex(keys.index(fmt))
+        dlg.delimiter_edit.setText(delimiter)
+        dlg._on_accept()  # 消耗 SAVE_DIALOG_RESPONSES 并写出文件
+
     tmp_csv = str(Path(tempfile.gettempdir()) / "e2e_export.csv")
-    SAVE_DIALOG_RESPONSES.append((tmp_csv, ""))
-    results_control.export_to_csv()
-    csv_text = Path(tmp_csv).read_text(encoding="utf-8") if Path(tmp_csv).exists() else ""
+    _drive_export(results_control, False, tmp_csv, "csv")
+    csv_text = Path(tmp_csv).read_text(encoding="utf-8-sig") if Path(tmp_csv).exists() else ""
     check("CSV 导出", Path(tmp_csv).exists() and len(csv_text.splitlines()) == 6,
           f"{len(csv_text.splitlines())} 行(含表头)")
 
-    # JSON 导出
     tmp_json = str(Path(tempfile.gettempdir()) / "e2e_export.json")
-    SAVE_DIALOG_RESPONSES.append((tmp_json, ""))
-    results_control.export_to_json()
+    _drive_export(results_control, False, tmp_json, "json")
     import json as _json
     data = _json.loads(Path(tmp_json).read_text(encoding="utf-8")) \
         if Path(tmp_json).exists() else []
     check("JSON 导出", len(data) == 5 and "time" in data[0], f"{len(data)} 条")
 
-    # 选中行导出 CSV
+    # 选中行导出 CSV（自定义分隔符 ;）
     results_control.table.selectRow(0)
     tmp_csv2 = str(Path(tempfile.gettempdir()) / "e2e_export_selected.csv")
-    SAVE_DIALOG_RESPONSES.append((tmp_csv2, ""))
-    results_control.export_to_csv(True)
-    sel_text = Path(tmp_csv2).read_text(encoding="utf-8") if Path(tmp_csv2).exists() else ""
+    _drive_export(results_control, True, tmp_csv2, "csv", ";")
+    sel_text = Path(tmp_csv2).read_text(encoding="utf-8-sig") if Path(tmp_csv2).exists() else ""
     check("选中行 CSV 导出", Path(tmp_csv2).exists()
-          and len(sel_text.splitlines()) == 2, f"{len(sel_text.splitlines())} 行")
+          and len(sel_text.splitlines()) == 2 and ";" in sel_text.splitlines()[0],
+          f"{len(sel_text.splitlines())} 行")
 
 # GROUP BY 聚合查询 → 多标签页
 # 注意：activePower 等字段为 string 类型不可聚合；且全部 69 万点的时间戳均为

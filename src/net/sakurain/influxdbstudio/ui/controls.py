@@ -11,14 +11,13 @@ import json
 import re
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIntValidator, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
-    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
@@ -191,8 +190,7 @@ class QueryResultsControl(RequestControl):
         act_refresh = menu.addAction(tr("grid.header.refresh"))
         act_refresh.setEnabled(self.on_refresh is not None)
         menu.addSeparator()
-        act_csv = menu.addAction(tr("query.export.all_csv"))
-        act_json = menu.addAction(tr("query.export.all_json"))
+        act_export = menu.addAction(tr("query.export.all"))
         if chooser is not None:
             action = chooser(menu)
         else:
@@ -220,10 +218,8 @@ class QueryResultsControl(RequestControl):
         elif action is act_refresh:
             if callable(self.on_refresh):
                 self.on_refresh()
-        elif action is act_csv:
-            self.export_to_csv()
-        elif action is act_json:
-            self.export_to_json()
+        elif action is act_export:
+            self.export_rows_interactive(False)
 
     def sort_by_column(self, col: int, ascending: bool) -> None:
         """Sort the loaded rows of this page by a column (client-side).
@@ -261,7 +257,9 @@ class QueryResultsControl(RequestControl):
 
     # -- context menu ---------------------------------------------------------
 
-    def _show_context_menu(self, pos) -> None:
+    def _show_context_menu(self, pos, chooser=None) -> None:
+        """Show the grid body context menu; ``chooser(menu)`` replaces the
+        modal ``exec`` (used by tests to pick an action programmatically)."""
         menu = QMenu(self)
         has_selection = len(self.table.selectedItems()) > 0
         act_copy = menu.addAction(tr("grid.copy"))
@@ -284,13 +282,14 @@ class QueryResultsControl(RequestControl):
         act_save.setEnabled(dirty_rows > 0)
         act_revert.setEnabled(dirty_rows > 0)
         menu.addSeparator()
-        act_csv_all = menu.addAction(tr("query.export.all_csv"))
-        act_csv_sel = menu.addAction(tr("query.export.selected_csv"))
-        act_json_all = menu.addAction(tr("query.export.all_json"))
-        act_json_sel = menu.addAction(tr("query.export.selected_json"))
-        act_csv_sel.setEnabled(has_selection)
-        act_json_sel.setEnabled(has_selection)
-        action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        # 仅当选中了行（单行或多行）时显示导出入口；「导出全部」固定在编辑栏按钮上
+        act_export_sel = None
+        if has_selection:
+            act_export_sel = menu.addAction(tr("query.export.selected"))
+        if chooser is not None:
+            action = chooser(menu)
+        else:
+            action = menu.exec(self.table.viewport().mapToGlobal(pos))
         if action is act_copy:
             self.copy_selection()
         elif action is act_paste:
@@ -301,14 +300,8 @@ class QueryResultsControl(RequestControl):
             self.save_changes()
         elif action is act_revert:
             self.revert_changes()
-        elif action is act_csv_all:
-            self.export_to_csv()
-        elif action is act_csv_sel:
-            self.export_to_csv(True)
-        elif action is act_json_all:
-            self.export_to_json()
-        elif action is act_json_sel:
-            self.export_to_json(True)
+        elif act_export_sel is not None and action is act_export_sel:
+            self.export_rows_interactive(True)
 
     # -- cell editing (DBeaver-like) -------------------------------------------
 
@@ -664,49 +657,24 @@ class QueryResultsControl(RequestControl):
         name = f"{self.influx_client.connection.Name}_{self.database}"
         return f"{name}.{ext}"
 
-    def export_to_csv(self, only_selected: bool = False) -> None:
-        try:
-            path, _ = QFileDialog.getSaveFileName(
-                self, tr("query.export.all_csv"), self._suggest_name("csv"),
-                tr("query.csv_filter"))
-            if not path:
-                return
-            with open(path, "w", encoding="utf-8", newline="") as f:
-                columns = [self.table.horizontalHeaderItem(i).text()
-                           for i in range(1, self.table.columnCount())]
-                f.write(",".join(columns) + "\n")
-                selected_rows = sorted({i.row() for i in self.table.selectedItems()})
-                for row in range(self.table.rowCount()):
-                    if only_selected and row not in selected_rows:
-                        continue
-                    values = [self.table.item(row, col).text() if self.table.item(row, col) else ""
-                              for col in range(1, self.table.columnCount())]
-                    f.write(",".join(values) + "\n")
-        except Exception as ex:
-            display_exception(ex, parent=self)
+    def _collect_rows(self, only_selected: bool) -> Tuple[List[str], List[list]]:
+        columns = [self.table.horizontalHeaderItem(i).text()
+                   for i in range(1, self.table.columnCount())]
+        selected_rows = {i.row() for i in self.table.selectedItems()}
+        rows: List[list] = []
+        for row in range(self.table.rowCount()):
+            if only_selected and row not in selected_rows:
+                continue
+            values = [self.table.item(row, col).text() if self.table.item(row, col) else ""
+                      for col in range(1, self.table.columnCount())]
+            rows.append(values)
+        return columns, rows
 
-    def export_to_json(self, only_selected: bool = False) -> None:
+    def export_rows_interactive(self, only_selected: bool = False) -> None:
+        from .dialogs import run_export_dialog
         try:
-            path, _ = QFileDialog.getSaveFileName(
-                self, tr("query.export.all_json"), self._suggest_name("json"),
-                tr("query.json_filter"))
-            if not path:
-                return
-            array: List[Any] = []
-            result = self._last_result
-            if result is not None:
-                index_to_name = {i: col for i, col in enumerate(result.Columns)}
-                selected_rows = {i.row() for i in self.table.selectedItems()}
-                for i, row_values in enumerate(result.Values):
-                    if only_selected and i not in selected_rows:
-                        continue
-                    d: Dict[str, Any] = {}
-                    for x, value in enumerate(row_values):
-                        key = index_to_name[x]
-                        d[key] = value
-                    array.append(d)
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(array, f, indent=2)
+            columns, rows = self._collect_rows(only_selected)
+            run_export_dialog(self._suggest_name, columns, rows, parent=self)
         except Exception as ex:
             display_exception(ex, parent=self)
 
@@ -789,10 +757,13 @@ class QueryControl(RequestControl):
         edit_bar.setContentsMargins(4, 2, 4, 0)
         self.btn_grid_save = QPushButton()
         self.btn_grid_revert = QPushButton()
+        self.btn_grid_export = QPushButton(tr("query.export.all"))
         self.btn_grid_save.clicked.connect(self._save_current_grid)
         self.btn_grid_revert.clicked.connect(self._revert_current_grid)
+        self.btn_grid_export.clicked.connect(self._export_current_grid)
         edit_bar.addWidget(self.btn_grid_save)
         edit_bar.addWidget(self.btn_grid_revert)
+        edit_bar.addWidget(self.btn_grid_export)
         edit_bar.addStretch(1)
         self.edit_bar_widget = QWidget()
         self.edit_bar_widget.setLayout(edit_bar)
@@ -821,6 +792,11 @@ class QueryControl(RequestControl):
         control = self._current_results_control()
         if control is not None:
             control.revert_changes()
+
+    def _export_current_grid(self) -> None:
+        control = self._current_results_control()
+        if control is not None:
+            control.export_rows_interactive(False)
 
     def _sync_edit_bar(self) -> None:
         control = self._current_results_control()
@@ -1031,62 +1007,37 @@ class MeasurementControl(RequestControl):
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
         has_selection = len(self.table.selectedItems()) > 0
-        act_csv_all = menu.addAction(tr("query.export.all_csv"))
-        act_csv_sel = menu.addAction(tr("query.export.selected_csv"))
-        act_json_all = menu.addAction(tr("query.export.all_json"))
-        act_json_sel = menu.addAction(tr("query.export.selected_json"))
-        act_csv_sel.setEnabled(has_selection)
-        act_json_sel.setEnabled(has_selection)
+        act_export_all = menu.addAction(tr("query.export.all"))
+        act_export_sel = None
+        if has_selection:
+            act_export_sel = menu.addAction(tr("query.export.selected"))
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
-        if action is act_csv_all:
-            self.export_to_csv()
-        elif action is act_csv_sel:
-            self.export_to_csv(True)
-        elif action is act_json_all:
-            self.export_to_json()
-        elif action is act_json_sel:
-            self.export_to_json(True)
+        if action is act_export_all:
+            self.export_rows_interactive(False)
+        elif act_export_sel is not None and action is act_export_sel:
+            self.export_rows_interactive(True)
 
     def _suggest_name(self, ext: str) -> str:
         return f"{self.measurement}_{self.export_file_name_stem}.{ext}"
 
-    def export_to_csv(self, only_selected: bool = False) -> None:
-        try:
-            path, _ = QFileDialog.getSaveFileName(
-                self, tr("query.export.all_csv"), self._suggest_name("csv"),
-                tr("query.csv_filter"))
-            if not path:
-                return
-            with open(path, "w", encoding="utf-8", newline="") as f:
-                columns = [self.table.horizontalHeaderItem(i).text()
-                           for i in range(1, self.table.columnCount())]
-                f.write(",".join(columns) + "\n")
-                selected_rows = sorted({i.row() for i in self.table.selectedItems()})
-                for row in range(self.table.rowCount()):
-                    if only_selected and row not in selected_rows:
-                        continue
-                    values = [self.table.item(row, col).text() if self.table.item(row, col) else ""
-                              for col in range(1, self.table.columnCount())]
-                    f.write(",".join(values) + "\n")
-        except Exception as ex:
-            display_exception(ex, parent=self)
+    def _collect_rows(self, only_selected: bool):
+        columns = [self.table.horizontalHeaderItem(i).text()
+                   for i in range(1, self.table.columnCount())]
+        selected_rows = {i.row() for i in self.table.selectedItems()}
+        rows = []
+        for row in range(self.table.rowCount()):
+            if only_selected and row not in selected_rows:
+                continue
+            values = [self.table.item(row, col).text() if self.table.item(row, col) else ""
+                      for col in range(1, self.table.columnCount())]
+            rows.append(values)
+        return columns, rows
 
-    def export_to_json(self, only_selected: bool = False) -> None:
+    def export_rows_interactive(self, only_selected: bool = False) -> None:
+        from .dialogs import run_export_dialog
         try:
-            path, _ = QFileDialog.getSaveFileName(
-                self, tr("query.export.all_json"), self._suggest_name("json"),
-                tr("query.json_filter"))
-            if not path:
-                return
-            array: List[Any] = []
-            selected_rows = {i.row() for i in self.table.selectedItems()}
-            for row in range(self.table.rowCount()):
-                if only_selected and row not in selected_rows:
-                    continue
-                item = self.table.item(row, 0)
-                array.append(item.data(Qt.UserRole) if item else None)
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(array, f, indent=2, default=str)
+            columns, rows = self._collect_rows(only_selected)
+            run_export_dialog(self._suggest_name, columns, rows, parent=self)
         except Exception as ex:
             display_exception(ex, parent=self)
 

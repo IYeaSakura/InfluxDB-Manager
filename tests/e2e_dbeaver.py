@@ -572,6 +572,113 @@ check("无刷新回调时菜单项禁用", refreshed == [1])
 
 shot(rc2, "header_menu_grid")
 
+# -- 导出：右键「导出选中行」+ 导出对话框（格式/分隔符/位置）-------------------
+from net.sakurain.influxdbstudio.core import exporters
+from net.sakurain.influxdbstudio.ui import dialogs as dlg_mod
+
+SAVED_RESPONSES = SAVE_DIALOG_RESPONSES  # 别名，语义一致
+
+
+def body_menu_actions(control):
+    """弹出表格体右键菜单，返回其全部 action 文本列表（chooser 替代模态 exec）。"""
+    texts = []
+
+    def chooser(menu):
+        texts.extend(act.text() for act in menu.actions())
+        return None
+
+    control._show_context_menu(_QPoint(10, 10), chooser=chooser)
+    return texts
+
+
+# 无选中时：不出现「导出选中行」
+rc2.table.clearSelection()
+texts_no_sel = body_menu_actions(rc2)
+check("无选中时右键无导出入口",
+      _tr("query.export.selected") not in texts_no_sel, str(texts_no_sel))
+
+# 选中一行后：出现「导出选中行」
+rc2.table.selectRow(1)
+texts_sel = body_menu_actions(rc2)
+check("选中行后右键显示导出选中行",
+      _tr("query.export.selected") in texts_sel, str(texts_sel))
+
+# 表头菜单包含「导出全部」（点击会弹模态导出框，先把 exec 打成取消）
+real_qdialog_exec = dlg_mod.QDialog.exec
+dlg_mod.QDialog.exec = lambda self: dlg_mod.QDialog.Rejected
+try:
+    act_export_all = click_header_menu(rc2, _tr("query.export.all"),
+                                       header_pos(rc2, 1))
+finally:
+    dlg_mod.QDialog.exec = real_qdialog_exec
+check("表头菜单含导出全部", act_export_all is not None)
+
+
+# 导出对话框行为
+export_dlg = dlg_mod.ExportDialog(rc2._suggest_name)
+check("导出格式共6种", export_dlg.format_combo.count() == 6,
+      str(export_dlg.format_combo.count()))
+check("CSV 默认分隔符为逗号",
+      export_dlg.delimiter_edit.text() == ","
+      and export_dlg.delimiter_edit.isEnabled())
+fmt_index = {export_dlg.format_combo.itemData(i): i
+             for i in range(export_dlg.format_combo.count())}
+export_dlg.format_combo.setCurrentIndex(fmt_index["json"])
+check("非 CSV 格式分隔符禁用", not export_dlg.delimiter_edit.isEnabled())
+export_dlg.format_combo.setCurrentIndex(fmt_index["csv"])
+export_dlg.delimiter_edit.setText(";;")
+modals_before = len(MODALS)
+export_dlg._on_accept()  # 非法分隔符 → 报错且不弹保存框
+check("非法分隔符报错", any(m[0] == "critical" for m in MODALS[modals_before:]),
+      str(MODALS[modals_before:]))
+export_dlg.delimiter_edit.setText(";")
+
+# 完整导出流程：csv + 自定义分隔符（exec 打补丁直接接受）
+import tempfile as _tf
+from net.sakurain.influxdbstudio.core import exporters as _exp_mod
+tmp_dir = _tf.mkdtemp(prefix="idm_export_")
+out_csv = tmp_dir + "\\rows.csv"
+SAVE_DIALOG_RESPONSES.append((out_csv, ""))
+
+
+def _accept_with(choice):
+    def _exec(self):
+        self.choice = choice
+        return dlg_mod.QDialog.Accepted
+    return _exec
+
+
+real_exec = dlg_mod.QDialog.exec
+dlg_mod.QDialog.exec = _accept_with((out_csv, "csv", ";"))
+try:
+    n_csv = dlg_mod.run_export_dialog(rc2._suggest_name,
+                                      *rc2._collect_rows(False), parent=rc2)
+finally:
+    dlg_mod.QDialog.exec = real_exec
+csv_text = Path(out_csv).read_text(encoding="utf-8-sig")
+check("导出CSV写出成功", n_csv == 3 and len(csv_text.splitlines()) == 4
+      and ";" in csv_text.splitlines()[0],  # header + 3 rows, 分号分隔
+      f"n={n_csv} {len(csv_text.splitlines())} 行")
+
+# run_export_dialog 全程：选中行导出 JSON
+out_json = tmp_dir + "\\rows.json"
+rc2.table.clearSelection()
+rc2.table.item(0, 1).setSelected(True)
+rc2.table.item(2, 1).setSelected(True)
+dlg_mod.QDialog.exec = _accept_with((out_json, "json", ","))
+try:
+    n = dlg_mod.run_export_dialog(rc2._suggest_name,
+                                  *rc2._collect_rows(True), parent=rc2)
+finally:
+    dlg_mod.QDialog.exec = real_exec
+import json as _json
+_json_data = _json.loads(Path(out_json).read_text(encoding="utf-8"))
+check("导出选中行(JSON) 2行", n == 2 and len(_json_data) == 2,
+      f"n={n}")
+check("导出完成提示", any(m[0] == "information" for m in MODALS[-3:]),
+      str(MODALS[-3:]))
+rc2.table.clearSelection()
+
 # -- SQL 编辑器：Ctrl+/ 注释整行 + 注释行变灰 ----------------------------------
 from net.sakurain.influxdbstudio.ui.common import (
     _toggle_line_comment, create_sql_editor)
