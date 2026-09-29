@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.0 — 2026-09-29
+
+向后兼容的功能版本。
+
+### 新增
+
+- 结果导出：结果网格支持导出 CSV / XLSX / XML / Markdown / JSON / HTML 六种格式（CSV 支持自定义分隔符，默认 `,`，UTF-8 BOM 兼容 Excel）
+- 导出全部：在后台重新执行原始查询（不带分页 LIMIT），导出**完整查询结果**而非当前页数据；执行期间 GUI 不卡死（等待光标提示）
+- 导出选中行：表格右键菜单仅在选中行时出现，导出所选行
+- 导出位置记忆：自动记住上次导出目录，下次导出直接定位到该目录（持久化于 settings.json）
+- SQL 编辑器字体缩放：Ctrl+= 放大、Ctrl+- 缩小、Ctrl+0 复位
+
 ## 1.0.0 — 2026-09-28
 
 InfluxDB Manager 首个正式版本。参考原项目 InfluxDB Studio（CymaticLabs，MIT），使用 Python/PySide6 完全重构，并新增大量功能。

@@ -123,6 +123,9 @@ class QueryResultsControl(RequestControl):
         self.on_dirty_changed = None
         # called to re-run the query (set by QueryControl)
         self.on_refresh = None
+        # set by QueryControl: re-runs the original (unpaginated) query and
+        # returns (columns, rows) for export-all; None falls back to the grid
+        self.export_all_fetcher = None
         self._guard = False
 
         layout = QVBoxLayout(self)
@@ -673,10 +676,42 @@ class QueryResultsControl(RequestControl):
     def export_rows_interactive(self, only_selected: bool = False) -> None:
         from .dialogs import run_export_dialog
         try:
+            if not only_selected and self.export_all_fetcher is not None:
+                self._export_all_interactive()
+                return
             columns, rows = self._collect_rows(only_selected)
             run_export_dialog(self._suggest_name, columns, rows, parent=self)
         except Exception as ex:
             display_exception(ex, parent=self)
+
+    def _export_all_interactive(self) -> None:
+        """Export the *full* query result: re-runs the original unpaginated
+        query on a worker thread (the GUI stays responsive), then writes the
+        file in the chosen format."""
+        from ..core import exporters
+        from .dialogs import pick_export_choice
+        choice = pick_export_choice(self._suggest_name, parent=self)
+        if choice is None:
+            return
+        path, fmt, delimiter = choice
+        # busy indication while the full query runs in the background
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+
+        def work():
+            return self.export_all_fetcher()
+
+        def done(columns_rows):
+            QApplication.restoreOverrideCursor()
+            columns, rows = columns_rows
+            exporters.export_rows(path, fmt, columns, rows, delimiter)
+            QMessageBox.information(
+                self, tr("export.success.title"),
+                tr("export.success", n=len(rows), path=path))
+
+        def failed(_ex):
+            QApplication.restoreOverrideCursor()
+
+        self._run(work, done, failed)
 
 
 # ---------------------------------------------------------------------------
@@ -942,6 +977,12 @@ class QueryControl(RequestControl):
                     control.on_refresh = self.execute_request
                     self.results_tabs.addTab(control, f"{tab_label} {tab_count}")
                     self._results_count += control.update_results(result)
+                    # export-all re-runs the original unpaginated query and
+                    # exports this tab's series in full
+                    idx = tab_count - 1
+                    control.export_all_fetcher = (
+                        lambda q=query, i=idx, cols=list(control._columns):
+                        self._fetch_all_rows(q, i, cols))
             self.results_label.setText(tr(
                 "query.results_label", count=self._results_count, ms=elapsed_ms))
             self._update_pager()
@@ -953,6 +994,21 @@ class QueryControl(RequestControl):
             self._update_pager()
 
         self._run(work, done, failed)
+
+    def _fetch_all_rows(self, query: str, series_index: int,
+                        fallback_columns: List[str]):
+        """Re-run the original (unpaginated) query and format the series at
+        ``series_index`` exactly like the grid does. Runs on a worker thread.
+        """
+        results = self.influx_client.query(self.database, query) if query \
+            else None
+        if results and series_index < len(results):
+            series = results[series_index]
+            columns = list(series.Columns)
+            rows = [[_cell_text(v) for v in row_values]
+                    for row_values in series.Values]
+            return columns, rows
+        return fallback_columns, []
 
     def _maybe_load_total(self, query: str) -> None:
         """Fetch the total row count once — read-only COUNT(*) query."""

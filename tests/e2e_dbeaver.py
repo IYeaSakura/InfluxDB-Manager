@@ -679,6 +679,116 @@ check("导出完成提示", any(m[0] == "information" for m in MODALS[-3:]),
       str(MODALS[-3:]))
 rc2.table.clearSelection()
 
+# -- 导出全部 = 完整查询数据（重跑原始查询，不带分页 LIMIT）--------------------
+class _FullExportClient(FakeClient):
+    """全量查询返回 600 行；带 LIMIT/OFFSET 的分页查询返回切片。"""
+
+    def query(self, database, query):
+        self.queries.append(query)
+        q = query.strip()
+        if q.upper().startswith("SELECT COUNT("):
+            return [InfluxDbSeries("m", ["time", "count_v"], None,
+                                   [["1970-01-01T00:00:00Z", 600]])]
+        if q.upper().startswith("SELECT"):
+            rows = [[f"2026-09-27T16:{i // 60:02d}:{i % 60:02d}Z", i]
+                    for i in range(600)]
+            import re as _re
+            lim = _re.search(r"\blimit\s+(\d+)", q, _re.IGNORECASE)
+            off = _re.search(r"\boffset\s+(\d+)", q, _re.IGNORECASE)
+            if lim:
+                n = int(lim.group(1))
+                o = int(off.group(1)) if off else 0
+                rows = (rows * (o + n + 1))[o:o + n]
+            return [InfluxDbSeries("curveData3761",
+                                   ["time", "currentA"], None, rows)]
+        return []
+
+
+full_client = _FullExportClient()
+qc_ex = controls.QueryControl()
+qc_ex.influx_client = full_client
+qc_ex.database = "zn_data"
+qc_ex.show()
+qc_ex.editor_text = 'SELECT * FROM "curveData3761"'
+qc_ex.execute_request()
+ok = wait_for(lambda: not qc_ex._loading and qc_ex.results_tabs.count() > 0,
+              timeout_ms=8000)
+check("导出全部-分页查询出结果", ok)
+rc_ex = qc_ex.results_tabs.widget(0)
+check("导出全部-fetcher 已注入",
+      callable(getattr(rc_ex, "export_all_fetcher", None)))
+check("当前页仅一页数据(500)", rc_ex.table.rowCount() == 500,
+      str(rc_ex.table.rowCount()))
+
+out_all = tmp_dir + "\\all.json"
+dlg_mod.QDialog.exec = _accept_with((out_all, "json", ","))
+try:
+    rc_ex.export_rows_interactive(False)
+finally:
+    dlg_mod.QDialog.exec = real_exec
+ok = wait_for(lambda: Path(out_all).exists(), timeout_ms=8000)
+check("导出全部写出文件", ok)
+if ok:
+    _all_data = _json.loads(Path(out_all).read_text(encoding="utf-8"))
+    check("导出全部=全量 600 行(非当前页 500)", len(_all_data) == 600,
+          str(len(_all_data)))
+check("导出全部重跑原始查询(无分页 LIMIT)",
+      any(q.strip() == 'SELECT * FROM "curveData3761"'
+          for q in full_client.queries),
+      str(full_client.queries[-3:]))
+
+# -- 导出位置记忆 -------------------------------------------------------------
+import os as _os
+settings.last_export_dir = ""
+_start_dirs = []
+_real_gsfn = _W.QFileDialog.getSaveFileName
+
+
+def _capture_start(parent, title, directory, filter_):
+    _start_dirs.append(directory)
+    return (_os.path.join(tmp_dir, "mem.csv"), "")
+
+
+_W.QFileDialog.getSaveFileName = staticmethod(_capture_start)
+try:
+    # 让 exec 直接走真实的 _on_accept（弹保存框→记忆位置→置 choice）
+    def _accept_real(self):
+        self._on_accept()
+        return self.result()
+    dlg_mod.QDialog.exec = _accept_real
+    n1 = dlg_mod.run_export_dialog(rc2._suggest_name,
+                                   *rc2._collect_rows(False), parent=rc2)
+    n2 = dlg_mod.run_export_dialog(rc2._suggest_name,
+                                   *rc2._collect_rows(False), parent=rc2)
+finally:
+    dlg_mod.QDialog.exec = real_exec
+    _W.QFileDialog.getSaveFileName = _real_gsfn
+check("导出位置已记忆", settings.last_export_dir == tmp_dir,
+      settings.last_export_dir)
+check("第二次导出起始位置为记忆目录",
+      len(_start_dirs) == 2
+      and _os.path.dirname(_start_dirs[1]) == tmp_dir
+      and _start_dirs[0] != _start_dirs[1],
+      str(_start_dirs))
+
+# -- 编辑器字体缩放（Ctrl+= / Ctrl+- / Ctrl+0）--------------------------------
+from net.sakurain.influxdbstudio.ui.common import \
+    create_sql_editor as _create_sql_editor
+ed2 = _create_sql_editor()
+ed2.show()
+_base_size = ed2.font().pointSize()
+QTest.qWait(50)
+QTest.keyClick(ed2, Qt.Key_Equal, Qt.ControlModifier)
+check("Ctrl+= 放大字体", ed2.font().pointSize() == _base_size + 1,
+      str(ed2.font().pointSize()))
+QTest.keyClick(ed2, Qt.Key_Minus, Qt.ControlModifier)
+QTest.keyClick(ed2, Qt.Key_Minus, Qt.ControlModifier)
+check("Ctrl+- 缩小字体", ed2.font().pointSize() == _base_size - 1,
+      str(ed2.font().pointSize()))
+QTest.keyClick(ed2, Qt.Key_0, Qt.ControlModifier)
+check("Ctrl+0 复位字体", ed2.font().pointSize() == _base_size,
+      str(ed2.font().pointSize()))
+
 # -- SQL 编辑器：Ctrl+/ 注释整行 + 注释行变灰 ----------------------------------
 from net.sakurain.influxdbstudio.ui.common import (
     _toggle_line_comment, create_sql_editor)
@@ -756,6 +866,8 @@ _orig_mcd = mw_module.ManageConnectionsDialog
 mw_module.ManageConnectionsDialog = _ProbeDialog
 _orig_connections = list(app_module.settings.connections)
 app_module.settings.connections = [conn]
+# MainWindow 启动时会从磁盘 load_all()，必须把连接写入隔离配置
+app_module.settings.save_all()
 
 
 class _FailClient(InfluxDbClient):

@@ -1,6 +1,7 @@
 """Dialog windows (ports of the C# Dialogs/* classes)."""
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import List, Optional
 
@@ -1113,14 +1114,29 @@ class ExportDialog(QDialog):
         ext = exporters.extension(fmt)
         filters = ";;".join(
             f"{label} (*.{ex})" for _k, label, ex in exporters.FORMATS)
+        # Start in the last used export directory (remembered across launches).
+        from ..app import settings
+        suggested = self._suggest_name(ext)
+        start_dir = getattr(settings, "last_export_dir", "")
+        start = os.path.join(start_dir, suggested) if start_dir else suggested
         path, _sel = QFileDialog.getSaveFileName(
-            self, tr("export.dialog.title"), self._suggest_name(ext), filters)
+            self, tr("export.dialog.title"), start, filters)
         if not path:
             return
         if not path.lower().endswith("." + ext):
             path += "." + ext
+        settings.set_last_export_dir(path)
         self.choice = (path, fmt, delimiter)
         self.accept()
+
+
+def pick_export_choice(suggest_name, parent: QWidget = None):
+    """Show the export dialog and return ``(path, fmt, delimiter)``,
+    or None when cancelled. Does not write any file."""
+    dialog = ExportDialog(suggest_name, parent=parent)
+    if dialog.exec() != QDialog.Accepted or dialog.choice is None:
+        return None
+    return dialog.choice
 
 
 def run_export_dialog(suggest_name, columns, rows,
@@ -1129,10 +1145,10 @@ def run_export_dialog(suggest_name, columns, rows,
 
     Returns the number of exported rows, or None when cancelled.
     """
-    dialog = ExportDialog(suggest_name, parent=parent)
-    if dialog.exec() != QDialog.Accepted or dialog.choice is None:
+    choice = pick_export_choice(suggest_name, parent=parent)
+    if choice is None:
         return None
-    path, fmt, delimiter = dialog.choice
+    path, fmt, delimiter = choice
     exporters.export_rows(path, fmt, columns, rows, delimiter)
     QMessageBox.information(
         parent, tr("export.success.title"),

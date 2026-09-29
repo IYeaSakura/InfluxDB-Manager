@@ -1,8 +1,8 @@
-; InfluxDB Manager 1.0.0 — Inno Setup script
-; Produces dist\InfluxDBManager-Setup-1.0.0.exe
+; InfluxDB Manager 1.1.0 — Inno Setup script
+; Produces dist\InfluxDBManager-Setup-1.1.0.exe
 
 #define MyAppName      "InfluxDB Manager"
-#define MyAppVersion   "1.0.0"
+#define MyAppVersion   "1.1.0"
 #define MyAppPublisher "net.sakurain"
 #define MyAppURL       "https://github.com/IYeaSakura/InfluxDB-Manager"
 #define MyAppExeName   "InfluxDBManager.exe"
@@ -21,7 +21,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 ; Output
 OutputDir=D:\CodeLab\InfluxDBStudio\dist
-OutputBaseFilename=InfluxDBManager-Setup-1.0.0
+OutputBaseFilename=InfluxDBManager-Setup-1.1.0
 ; Compression: maximum, solid
 Compression=lzma2/ultra64
 SolidCompression=yes

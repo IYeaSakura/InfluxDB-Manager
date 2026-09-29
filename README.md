@@ -46,10 +46,14 @@ Core features inherited from the original project's design and reimplemented in 
 - **Row deletion**: select rows and press **Delete** (or use the context menu) to stage them (red highlight); on save, generates precise `DELETE FROM "m" WHERE time = '...ns RFC3339...' AND "tag" = '...'` statements; reverts cleanly with the rollback action
 - **Second-confirmation save**: a confirmation dialog lists every overwrite and every staged row deletion before anything touches the database; successful save reports overwritten/deleted row counts
 - **Visible save/revert bar**: always shown above the results, enabled only while changes exist; also available via context menu and Ctrl+S
-- **Header context menu**: copy column name / copy all column names, sort the current page ascending or descending (numeric-aware, disabled while dirty), column width fit-values, hide column / show all columns, refresh, export CSV/JSON
-- **Body context menu**: copy/paste, save/revert changes, delete selected rows, export all/selected to CSV/JSON
+- **Header context menu**: copy column name / copy all column names, sort the current page ascending or descending (numeric-aware, disabled while dirty), column width fit-values, hide column / show all columns, refresh, export
+- **Body context menu**: copy/paste, save/revert changes, delete selected rows, and (only when rows are selected) export selected rows
 - Selection highlight in blue; copy/paste integrates with the system clipboard (TSV)
-- Export results to CSV or JSON (all rows or selected rows only)
+- **Export results**: six formats — CSV / XLSX / XML / Markdown / JSON / HTML; CSV allows a custom delimiter (default `,`) and is written as UTF-8 with BOM for Excel compatibility
+- **Export All**: re-runs the original query without the pagination `LIMIT` on a worker thread and exports the **complete query result** (not just the current page); the GUI stays responsive with a busy cursor
+- **Export Selected Rows**: exports only the selected rows, available from the body context menu
+- **Export location memory**: the last export directory is remembered across launches
+- **Editor font zoom**: Ctrl+= to enlarge, Ctrl+- to shrink, Ctrl+0 to reset
 
 ### Database Administration
 
@@ -230,6 +234,13 @@ The application stores connections in the per-user settings file (no `.env` need
 - Right-click a tab and choose **Rename** to give it a meaningful name.
 - Scripts are saved automatically (on tab close and on application exit) and restored — including the active tab — the next time you start the application.
 
+### Export Results
+
+- Click **Export All** in the grid toolbar (or the header context menu) to export the **complete query result**: the original query is re-executed without the pagination `LIMIT` on a worker thread, so even millions of rows do not freeze the UI.
+- Right-click selected rows and choose **Export Selected Rows** to export only the selection.
+- Pick a format (CSV / XLSX / XML / Markdown / JSON / HTML); for CSV you can set a custom delimiter (default `,`).
+- The last export directory is remembered for the next export.
+
 ---
 
 ## Development
@@ -269,7 +280,7 @@ set QT_QPA_PLATFORM=offscreen          # Windows
 
 ### Versioning
 
-- Current version: `1.0.0` (`net.sakurain.influxdbstudio.__version__`)
+- Current version: `1.1.0` (`net.sakurain.influxdbstudio.__version__`)
 - Settings files carry a `Version` field; migrations should be added to `AppSettings.load_all`
 
 ---
@@ -287,7 +298,7 @@ The build uses a checked-in PyInstaller spec (`InfluxDBManager.spec`) that trims
 
 Note: the managed Python runtime used for development keeps its OpenSSL DLLs outside the standard library folder; the spec already bundles `libssl-3-x64.dll` / `libcrypto-3-x64.dll` explicitly. If you build with a standard python.org interpreter, you can drop those two `--add-binary` entries from the spec.
 
-Output: `dist_slim/InfluxDBManager.exe` (single file, windowed, sakurain icon, embedded version info `1.0.0.0`). The window and the Windows taskbar show the sakurain icon (an explicit `AppUserModelID` is set at startup so taskbar grouping shows the correct icon).
+Output: `dist_slim/InfluxDBManager.exe` (single file, windowed, sakurain icon, embedded version info `1.1.0.0`). The window and the Windows taskbar show the sakurain icon (an explicit `AppUserModelID` is set at startup so taskbar grouping shows the correct icon).
 
 ### Build a Windows Installer
 
@@ -297,7 +308,7 @@ The installer is built with [Inno Setup](https://jrsoftware.org/isdl.php) 7.x fr
 "path\to\ISCC.exe" installer\setup.iss
 ```
 
-Output: `dist/InfluxDBManager-Setup-1.0.0.exe` (~31 MB).
+Output: `dist/InfluxDBManager-Setup-1.1.0.exe` (~31 MB).
 
 ### Build Stages
 

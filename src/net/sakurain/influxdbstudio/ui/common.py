@@ -212,4 +212,35 @@ def create_sql_editor(parent: QWidget = None, placeholder: str = None) -> QPlain
     comment_shortcut = QShortcut(
         QKeySequence(Qt.CTRL | Qt.Key_Slash), editor)
     comment_shortcut.activated.connect(lambda: _toggle_line_comment(editor))
+
+    # Ctrl+= / Ctrl+- (and Ctrl+0 to reset): font zoom, DBeaver style
+    # (read the resolved size from the widget: a bare QFont("Consolas")
+    # reports a not-set size even though the widget resolves one)
+    editor._base_font_size = editor.font().pointSize()
+    if editor._base_font_size <= 0:
+        app = QPlainTextEdit().font()  # falls back to the application font
+        editor._base_font_size = app.pointSize() if app.pointSize() > 0 else 10
+
+    def _zoom(delta: int) -> None:
+        f = editor.font()
+        size = max(6, min(72, f.pointSize() + delta))
+        if size != f.pointSize():
+            f.setPointSize(size)
+            editor.setFont(f)
+            editor.setTabStopDistance(
+                4 * editor.fontMetrics().horizontalAdvance(" "))
+
+    zoom_in = QShortcut(QKeySequence(Qt.CTRL | Qt.Key_Equal), editor)
+    zoom_in.activated.connect(lambda: _zoom(+1))
+    zoom_out = QShortcut(QKeySequence(Qt.CTRL | Qt.Key_Minus), editor)
+    zoom_out.activated.connect(lambda: _zoom(-1))
+    zoom_reset = QShortcut(QKeySequence(Qt.CTRL | Qt.Key_0), editor)
+    zoom_reset.activated.connect(lambda: _reset_editor_font(editor))
     return editor
+
+
+def _reset_editor_font(editor: QPlainTextEdit) -> None:
+    f = editor.font()
+    f.setPointSize(getattr(editor, "_base_font_size", f.pointSize()))
+    editor.setFont(f)
+    editor.setTabStopDistance(4 * editor.fontMetrics().horizontalAdvance(" "))

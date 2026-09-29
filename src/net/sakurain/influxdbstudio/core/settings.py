@@ -57,6 +57,8 @@ class AppSettings:
         # (each: {"Name", "ConnectionId", "Database", "Text"})
         self.query_scripts: List[dict] = []
         self.active_query_tab = -1
+        # Last directory used for result export (remembered across launches)
+        self.last_export_dir = ""
 
     # -- persistence ---------------------------------------------------------
 
@@ -80,6 +82,7 @@ class AppSettings:
         if isinstance(scripts, list):
             self.query_scripts = [s for s in scripts if isinstance(s, dict)]
         self.active_query_tab = int(data.get("ActiveQueryTab", -1) or -1)
+        self.last_export_dir = data.get("LastExportDir", "") or ""
 
     def save_all(self) -> None:
         data = {
@@ -91,6 +94,7 @@ class AppSettings:
             "Connections": [c.to_dict() for c in self.connections],
             "QueryScripts": self.query_scripts,
             "ActiveQueryTab": self.active_query_tab,
+            "LastExportDir": self.last_export_dir,
         }
         try:
             with open(_settings_path(), "w", encoding="utf-8") as f:
@@ -159,6 +163,14 @@ class AppSettings:
     def set_language(self, language: str) -> None:
         if language in SUPPORTED_LANGUAGES:
             self.language = language
+            self.save_all()
+
+    def set_last_export_dir(self, path: str) -> None:
+        """Remember the directory of an exported file (``path`` is the
+        full file path chosen in the save dialog)."""
+        directory = os.path.dirname(os.path.abspath(path))
+        if directory and directory != self.last_export_dir:
+            self.last_export_dir = directory
             self.save_all()
 
     def format_time_value(self, dt) -> str:

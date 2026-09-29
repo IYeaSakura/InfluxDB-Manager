@@ -46,10 +46,14 @@ InfluxDB（1.x 时序数据库）的桌面 UI 管理工具 —— **参考**原 
 - **整行/多行删除**：选中行后按 **Delete**（或右键菜单）暂存（红色高亮）；保存时为每行生成精确的 `DELETE FROM "m" WHERE time = '...ns 精度 RFC3339...' AND "tag" = '...'` 语句；回滚可完整撤销
 - **二次确认保存**：确认框逐条列出覆写与删除明细，确认后才写入数据库；保存成功提示覆写/删除行数
 - **可见的保存/回滚按钮条**：结果区上方常显，有修改时才启用；右键菜单与 Ctrl+S 同样可用
-- **表头右键菜单**：复制字段名 / 复制全部字段名、升/降序排列当前页（数字感知排序，脏状态自动禁用）、列宽适合值、隐藏此列 / 显示全部列、刷新、导出 CSV/JSON
-- **表格区右键菜单**：复制/粘贴、保存/回滚修改、删除选中行、导出全部/选中为 CSV/JSON
+- **表头右键菜单**：复制字段名 / 复制全部字段名、升/降序排列当前页（数字感知排序，脏状态自动禁用）、列宽适合值、隐藏此列 / 显示全部列、刷新、导出
+- **表格区右键菜单**：复制/粘贴、保存/回滚修改、删除选中行，选中行后出现「导出选中行」
 - 选中单元格/行蓝色高亮；复制粘贴与系统剪贴板互通（TSV 格式）
-- 结果导出 CSV / JSON（全部行或仅选中行）
+- **结果导出**：支持 CSV / XLSX / XML / Markdown / JSON / HTML 六种格式；CSV 允许自定义分隔符（默认 `,`），以 UTF-8 带 BOM 写入，Excel 直接打开无乱码
+- **导出全部**：在后台重新执行原始查询（不带分页 LIMIT），导出**完整查询结果**而非当前页数据；导出期间 GUI 不卡死（等待光标提示）
+- **导出选中行**：仅导出所选行，从表格区右键菜单进入
+- **导出位置记忆**：自动记住上次导出目录，跨启动生效
+- **编辑器字体缩放**：Ctrl+= 放大、Ctrl+- 缩小、Ctrl+0 复位
 
 ### 数据库管理
 
@@ -230,6 +234,13 @@ python -m net.sakurain.influxdbstudio
 - 右键标签选择**重命名**，改成有意义的名称。
 - 脚本自动保存（关闭标签与退出应用时），下次启动自动恢复（包括活动标签页）。
 
+### 导出结果
+
+- 点击网格工具栏的**导出全部**（或表头右键菜单）：在后台重新执行原始查询（不带分页 LIMIT），导出**完整查询结果**而非当前页；即使数据量巨大也不会卡死界面。
+- 右键选中行选择**导出选中行**，仅导出所选内容。
+- 支持 CSV / XLSX / XML / Markdown / JSON / HTML 六种格式；CSV 可自定义分隔符（默认 `,`）。
+- 自动记住上次导出目录，下次导出直接定位。
+
 ---
 
 ## 开发指南
@@ -269,7 +280,7 @@ set QT_QPA_PLATFORM=offscreen          # Windows
 
 ### 版本管理
 
-- 当前版本：`1.0.0`（`net.sakurain.influxdbstudio.__version__`）
+- 当前版本：`1.1.0`（`net.sakurain.influxdbstudio.__version__`）
 - 设置文件带 `Version` 字段；迁移逻辑应加入 `AppSettings.load_all`
 
 ---
@@ -287,7 +298,7 @@ set QT_QPA_PLATFORM=offscreen          # Windows
 
 注意：开发所用的托管 Python 运行时将 OpenSSL DLL 放在标准库目录之外，spec 已通过 `--add-binary` 显式打包 `libssl-3-x64.dll` / `libcrypto-3-x64.dll`。若使用 python.org 官方解释器构建，可从 spec 中删去这两行。
 
-产物：`dist_slim/InfluxDBManager.exe`（单文件、无控制台窗口、sakurain 图标、内嵌版本信息 `1.0.0.0`）。窗口与 Windows 任务栏均显示 sakurain 图标（启动时显式设置 `AppUserModelID`，任务栏分组图标正确）。
+产物：`dist_slim/InfluxDBManager.exe`（单文件、无控制台窗口、sakurain 图标、内嵌版本信息 `1.1.0.0`）。窗口与 Windows 任务栏均显示 sakurain 图标（启动时显式设置 `AppUserModelID`，任务栏分组图标正确）。
 
 ### 构建 Windows 安装包
 
@@ -297,7 +308,7 @@ set QT_QPA_PLATFORM=offscreen          # Windows
 "path\to\ISCC.exe" installer\setup.iss
 ```
 
-产物：`dist/InfluxDBManager-Setup-1.0.0.exe`（约 31 MB）。
+产物：`dist/InfluxDBManager-Setup-1.1.0.exe`（约 31 MB）。
 
 ### 构建阶段
 
